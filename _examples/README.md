@@ -19,13 +19,14 @@ It doesn't always contain the "best ways" but it does cover each important featu
 
 ### Structuring
 
-Nothing stops you from using your favorite folder structure. Iris is a low level web framework, it has got MVC support but it doesn't limit your folder structure, this is your choice.
+Nothing stops you from using your favorite folder structure. Iris is a low level web framework, it has got MVC first-class support but it doesn't limit your folder structure, this is your choice.
 
-Structuring is always depends on your needs. We can't tell you how to design your own application for sure but you're free to take a closer look to the examples below; you may find something useful that you can borrow for your app
+Structuring depends on your own needs. We can't tell you how to design your own application for sure but you're free to take a closer look to the examples below; you may find something useful that you can borrow for your app
 
 - [Example 1](mvc/login)
 - [Example 2](structuring/mvc)
 - [Example 3](structuring/handler-based)
+- [Example 4](mvc/overview)
 
 ### HTTP Listening
 
@@ -173,20 +174,54 @@ If `app.Controller("/assets", new(file.Controller))`
 
 - `func(*Controller) GetByWildard(path string)` - `GET:/assets/{param:path}`
 
+    Supported types for method functions receivers: int, int64, bool and string.
+
+Response via output arguments, optionally, i.e
+
+```go
+func(c *ExampleController) Get() string |
+                                (string, string) |
+                                (string, int) |
+                                int |
+                                (int, string) |
+                                (string, error) |
+                                bool |
+                                (any, bool) |
+                                (bool, any) |
+                                error |
+                                (int, error) |
+                                (customStruct, error) |
+                                customStruct |
+                                (customStruct, int) |
+                                (customStruct, string) |
+                                mvc.Result or (mvc.Result, error) and so on...
+```
+
+where [mvc.Result](https://github.com/kataras/iris/blob/master/mvc/method_result.go) is an interface which contains only that function: `Dispatch(ctx iris.Context)`.
+
 **Using Iris MVC for code reuse** 
 
 By creating components that are independent of one another, developers are able to reuse components quickly and easily in other applications. The same (or similar) view for one application can be refactored for another application with different data because the view is simply handling how the data is being displayed to the user.
 
 If you're new to back-end web development read about the MVC architectural pattern first, a good start is that [wikipedia article](https://en.wikipedia.org/wiki/Model%E2%80%93view%E2%80%93controller).
 
-
 Follow the examples below,
 
-- [Hello world](mvc/hello-world/main.go)
-- [Session Controller](mvc/session-controller/main.go)
-- [A simple but featured Controller with model and views](mvc/controller-with-model-and-view).
-- [Login showcase](mvc/login/main.go) **NEW**
+- [Hello world](mvc/hello-world/main.go) **UPDATED**
+- [Session Controller](mvc/session-controller/main.go) **UPDATED**
+- [Overview - Plus Repository and Service layers](mvc/overview) **NEW**
+- [Login showcase - Plus Repository and Service layers](mvc/login) **NEW**
 
+<!-- 
+Why updated?
+Old method works, as promised no breaking changes.
+But mvc.C as controller marker and mvc.Result on method functions return value
+is more lightweight and faster than `mvc.Controller` because `mvc.Controller` initializes
+some fields like `Data, Path`... and Data is a map even if not used, at the opossite hand
+`mvc.C` just initializes the context `Ctx` field, the dev has all the `mvc.Controller`'s features
+by the `mvc.Result` built'n types like `mvc.Response` and `mvc.View` PLUS she/he can
+convert any custom type into a response dispatcher by implementing the `mvc.Result` interface.  
+-->
 
 ### Subdomains
 
@@ -199,8 +234,9 @@ Follow the examples below,
 
 - [From func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc)](convert-handlers/negroni-like/main.go)
 - [From http.Handler or http.HandlerFunc](convert-handlers/nethttp/main.go)
+- [From func(http.HandlerFunc) http.HandlerFunc](convert-handlers/real-usecase-raven/writing-middleware/main.go)
 
-### View 
+### View
 
 | Engine | Declaration |
 | -----------|-------------|

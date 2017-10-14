@@ -18,6 +18,192 @@ Developers are not forced to upgrade if they don't really need it. Upgrade whene
 
 **How to upgrade**: Open your command-line and execute this command: `go get -u github.com/kataras/iris`.
 
+# Th, 12 October 2017 | v8.5.2
+
+This version is part of the [releases](https://github.com/kataras/iris/releases).
+
+## MVC
+
+Add `bool` as a supported return value, if false then skips everything else and fires 404 not found.
+
+New example which covers the Service and Repository layers side-by-side with the MVC Architectural pattern, clean and simple: [_examples/mvc/overview](_examples/mvc/overview).
+
+## Websocket
+
+Fix(?) https://github.com/kataras/iris/issues/782 by @jerson with PR:  https://github.com/kataras/iris/pull/783.
+
+## Minor
+
+Add some minor comments for the view/django's origin type getters-- as pushed at PR: [#765](https://github.com/kataras/iris/pull/765).
+
+[sessions/sessiondb/badger](sessions/sessiondb/badger) vendored with: https://github.com/kataras/iris/commit/e7517ec79b45673e7cad353e52023ebd7237cf38.
+
+# Tu, 10 October 2017 | v8.5.1
+
+## MVC
+
+- fix any manual or before middleware's `ctx.ViewData(key, value)` gets overridden by setting `mvc.Controller.Data` or `return mvc.View {Data: ...}`. See the [test case](mvc/method_result_test.go#L226).
+
+# Mo, 09 October 2017 | v8.5.0
+
+## MVC
+
+Great news for our **MVC** Fans or if you're not you may want to use that powerful feature today, because of the smart coding and decisions the performance is quite the same to the pure handlers, see [_benchmarks](_benchmarks).
+
+A Controller's field that is an interface can now be binded to any type that implements that interface.
+
+Ability to send HTTP responses based on the Controller's method function's output values, see below;
+
+Iris now gives you the ability to render a response based on the **output values** returned from the controller's method functions!
+
+You can return any value of any type from a method function
+and it will be sent to the client as expected.
+
+* if `string` then it's the body.
+* if `string` is the second output argument then it's the content type.
+* if `int` then it's the status code.
+* if `error` and not nil then (any type) response will be omitted and error's text with a 400 bad request will be rendered instead.
+* if `(int, error)` and error is not nil then the response result will be the error's text with the status code as `int`.
+* if  `custom struct` or `interface{}` or `slice` or `map` then it will be rendered as json, unless a `string` content type is following.
+* if `mvc.Result` then it executes its `Dispatch` function, so good design patters can be used to split the model's logic where needed.
+
+The example below is not intended to be used in production but it's a good showcase of some of the return types we saw before;
+
+```go
+package main
+
+import (
+    "github.com/kataras/iris"
+    "github.com/kataras/iris/middleware/basicauth"
+    "github.com/kataras/iris/mvc"
+)
+
+// Movie is our sample data structure.
+type Movie struct {
+    Name   string `json:"name"`
+    Year   int    `json:"year"`
+    Genre  string `json:"genre"`
+    Poster string `json:"poster"`
+}
+
+// movies contains our imaginary data source.
+var movies = []Movie{
+    {
+        Name:   "Casablanca",
+        Year:   1942,
+        Genre:  "Romance",
+        Poster: "https://iris-go.com/images/examples/mvc-movies/1.jpg",
+    },
+    {
+        Name:   "Gone with the Wind",
+        Year:   1939,
+        Genre:  "Romance",
+        Poster: "https://iris-go.com/images/examples/mvc-movies/2.jpg",
+    },
+    {
+        Name:   "Citizen Kane",
+        Year:   1941,
+        Genre:  "Mystery",
+        Poster: "https://iris-go.com/images/examples/mvc-movies/3.jpg",
+    },
+    {
+        Name:   "The Wizard of Oz",
+        Year:   1939,
+        Genre:  "Fantasy",
+        Poster: "https://iris-go.com/images/examples/mvc-movies/4.jpg",
+    },
+}
+
+
+var basicAuth = basicauth.New(basicauth.Config{
+    Users: map[string]string{
+        "admin": "password",
+    },
+})
+
+
+func main() {
+    app := iris.New()
+
+    app.Use(basicAuth)
+
+    app.Controller("/movies", new(MoviesController))
+
+    app.Run(iris.Addr(":8080"))
+}
+
+// MoviesController is our /movies controller.
+type MoviesController struct {
+    // mvc.C is just a lightweight lightweight alternative
+    // to the "mvc.Controller" controller type,
+    // use it when you don't need mvc.Controller's fields
+    // (you don't need those fields when you return values from the method functions).
+    mvc.C
+}
+
+// Get returns list of the movies
+// Demo:
+// curl -i http://localhost:8080/movies
+func (c *MoviesController) Get() []Movie {
+    return movies
+}
+
+// GetBy returns a movie
+// Demo:
+// curl -i http://localhost:8080/movies/1
+func (c *MoviesController) GetBy(id int) Movie {
+    return movies[id]
+}
+
+// PutBy updates a movie
+// Demo:
+// curl -i -X PUT -F "genre=Thriller" -F "poster=@/Users/kataras/Downloads/out.gif" http://localhost:8080/movies/1
+func (c *MoviesController) PutBy(id int) Movie {
+    // get the movie
+    m := movies[id]
+
+    // get the request data for poster and genre
+    file, info, err := c.Ctx.FormFile("poster")
+    if err != nil {
+        c.Ctx.StatusCode(iris.StatusInternalServerError)
+        return Movie{}
+    }
+    file.Close()            // we don't need the file
+    poster := info.Filename // imagine that as the url of the uploaded file...
+    genre := c.Ctx.FormValue("genre")
+
+    // update the poster
+    m.Poster = poster
+    m.Genre = genre
+    movies[id] = m
+
+    return m
+}
+
+// DeleteBy deletes a movie
+// Demo:
+// curl -i -X DELETE -u admin:password http://localhost:8080/movies/1
+func (c *MoviesController) DeleteBy(id int) iris.Map {
+    // delete the entry from the movies slice
+    deleted := movies[id].Name
+    movies = append(movies[:id], movies[id+1:]...)
+    // and return the deleted movie's name
+    return iris.Map{"deleted": deleted}
+}
+```
+
+Another good example with a typical folder structure, that many developers are used to work, is located at the new [README.md](README.md) under the [Quick MVC Tutorial #3](README.md#quick-mvc-tutorial-3) section.
+
+# Fr, 06 October 2017 | v8.4.5
+
+- Badger team added support for transactions [yesterday](https://github.com/dgraph-io/badger/commit/06242925c2f2a5e73dc688e9049004029dd7f9f7), therefore the [badger session database](sessions/sessiondb/badger) is updated via https://github.com/kataras/iris/commit/0b48927562a2202809a7674ebedb738dc3da57e8.
+- MVC: Support more than one path parameters with a single `By`, when the `By` keyword is the last word and the func's input arguments are more than one i.e `GetBy(name string, age int)`, note that you can still use the older way of doing this; `GetByBy(string, int)`. It's an enhancement of the https://github.com/kataras/iris/issues/751  feature request.
+- MVC: Give controllers the ability to auto-initialize themselves by  `OnActivate` func derives from the new [ActivateListener](mvc/activator/activate_listener.go) interface, this can be used to perform any custom actions when the app registers the supported Controllers. See [mvc/session_controller.go](mvc/session_controller.go) for a good use case.
+- errors.Reporter.AddErr returns true if the error is added to the stack, otherwise false.
+- @ZaniaDeveloper fixed https://github.com/kataras/iris/issues/778 with PR: https://github.com/kataras/iris/pull/779.
+- Add `StatusSeeOther` at [mvc login example](https://github.com/kataras/iris/blob/master/_examples/mvc/login/user/controller.go#L53) for Redirection, reported by @motecshine at https://github.com/kataras/iris/issues/777.
+- Fix `DisableVersionChecker` configuration field is not being passed correctly when it was true via `iris.Run(..., iris.WithConfiguration{DisableVersionChecker:true, ...})` call.
+
 # Su, 01 October 2017 | v8.4.4
 
 - Fix https://github.com/kataras/iris/issues/762 reported by @xkylsoft
@@ -313,68 +499,7 @@ However two more methods added to the `Controller`.
 - `RelTmpl() string`, returns the relative template directory based on the controller's name.
 
 These are useful when dealing with big `controllers`, they help you to keep align with any
-future changes inside your application. 
-
-Let's refactor our [ProfileController](_examples/mvc/controller-with-model-and-view/main.go) enhancemed by these two new functions.
-
-```go
-func (pc *ProfileController) tmpl(relativeTmplPath string) {
-	// the relative template files directory of this controller.
-	views := pc.RelTmpl()
-	pc.Tmpl = views + relativeTmplPath
-}
-
-func (pc *ProfileController) match(relativeRequestPath string) bool {
-	// the relative request path of this controller.
-	path := pc.RelPath()
-	return path == relativeRequestPath
-}
-
-func (pc *ProfileController) Get() {
-	// requested: "/profile"
-	// so relative path is "/" because of the ProfileController.
-	if pc.match("/") {
-
-		// views/profile/index.html
-		pc.tmpl("index.html")
-		return
-	}
-
-	// requested: "/profile/browse"
-	// so relative path is "/browse".
-	if pc.match("/browse") {
-		pc.Path = "/profile"
-		return
-	}
-
-	// requested: "/profile/me"
-	// so the relative path is "/me"
-	if pc.match("/me") {
-		
-		// views/profile/me.html
-		pc.tmpl("me.html")
-		return
-	}
-
-	// requested: "/profile/$ID"
-	// so the relative path is "/$ID"
-	id, _ := pc.Params.GetInt64("id")
-
-	user, found := pc.DB.GetUserByID(id)
-	if !found {
-		pc.Status = iris.StatusNotFound
-
-		// views/profile/notfound.html
-		pc.tmpl("notfound.html")
-		pc.Data["ID"] = id
-		return
-	}
-
-	// views/profile/profile.html
-	pc.tmpl("profile.html")
-	pc.User = user
-}
-```
+future changes inside your application.
 
 Want to learn more about these functions? Go to the [mvc/controller_test.go](mvc/controller_test.go) file and scroll to the bottom!
 
@@ -583,7 +708,7 @@ and it adds its logic to its `BeginRequest`, [here](https://github.com/kataras/i
 
 Read access to the current route  via the `Route` field.
 
-**Using Iris MVC for code reuse** 
+**Using Iris MVC for code reuse**
 
 By creating components that are independent of one another, developers are able to reuse components quickly and easily in other applications. The same (or similar) view for one application can be refactored for another application with different data because the view is simply handling how the data is being displayed to the user.
 
@@ -592,9 +717,7 @@ If you're new to back-end web development read about the MVC architectural patte
 
 Follow the examples below,
 
-- [Hello world](_examples/mvc/hello-world/main.go)
-- [Session Controller](_examples/mvc/session-controller/main.go)
-- [A simple but featured Controller with model and views](_examples/mvc/controller-with-model-and-view).
+https://github.com/kataras/iris/tree/master/_examples/#mvc
 
 ### Bugs
 
