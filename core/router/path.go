@@ -45,6 +45,26 @@ func suffix(s string, suffix string) string {
 	return s
 }
 
+func splitMethod(methodMany string) []string {
+	methodMany = strings.Trim(methodMany, " ")
+	return strings.Split(methodMany, " ")
+}
+
+func splitPath(pathMany string) (paths []string) {
+	pathMany = strings.Trim(pathMany, " ")
+	pathsWithoutSlashFromFirstAndSoOn := strings.Split(pathMany, " /")
+	for _, path := range pathsWithoutSlashFromFirstAndSoOn {
+		if path == "" {
+			continue
+		}
+		if path[0] != '/' {
+			path = "/" + path
+		}
+		paths = append(paths, path)
+	}
+	return
+}
+
 func joinPath(path1 string, path2 string) string {
 	return path.Join(path1, path2)
 }
@@ -109,7 +129,10 @@ func hasSubdomain(s string) bool {
 	// if not start with "/" then it should be something else,
 	// we don't assume anything else but subdomain.
 	slashIdx := strings.IndexByte(s, '/')
-	return slashIdx > 0 || s[0] == SubdomainPrefix[0] || (len(s) >= 2 && s[0:2] == SubdomainWildcardIndicator)
+	return slashIdx > 0 || // for route paths
+		s[0] == SubdomainPrefix[0] || // for route paths
+		(len(s) >= 2 && s[0:2] == SubdomainWildcardIndicator) || // for party rel path or route paths
+		(len(s) >= 2 && slashIdx != 0 && s[len(s)-1] == '.') // for party rel, i.e www., or subsub.www.
 }
 
 // splitSubdomainAndPath checks if the path has subdomain and if it's
@@ -209,12 +232,13 @@ func (ps *RoutePathReverser) Path(routeName string, paramValues ...interface{}) 
 	return r.ResolvePath(toStringSlice(paramValues)...)
 }
 
-func toStringSlice(args []interface{}) []string {
-	var argsString []string
-	if len(args) > 0 {
-		argsString = make([]string, len(args), len(args))
+func toStringSlice(args []interface{}) (argsString []string) {
+	argsSize := len(args)
+	if argsSize <= 0 {
+		return
 	}
 
+	argsString = make([]string, argsSize, argsSize)
 	for i, v := range args {
 		if s, ok := v.(string); ok {
 			argsString[i] = s
@@ -229,7 +253,7 @@ func toStringSlice(args []interface{}) []string {
 			}
 		}
 	}
-	return argsString
+	return
 }
 
 // Remove the URL for now, it complicates things for the whole framework without a specific benefits,
@@ -246,21 +270,16 @@ func (ps *RoutePathReverser) URL(routeName string, paramValues ...interface{}) (
 		return
 	}
 
-	if len(paramValues) == 0 {
-		return r.Path
-	}
-
-	args := toStringSlice(paramValues)
-
 	host := ps.vhost
 	scheme := ps.vscheme
+	args := toStringSlice(paramValues)
+
 	// if it's dynamic subdomain then the first argument is the subdomain part
 	// for this part we are responsible not the custom routers
-	if r.Subdomain == SubdomainWildcardIndicator {
+	if len(args) > 0 && r.Subdomain == SubdomainWildcardIndicator {
 		subdomain := args[0]
 		host = subdomain + "." + host
 		args = args[1:] // remove the subdomain part for the arguments,
-
 	}
 
 	if parsedPath := r.ResolvePath(args...); parsedPath != "" {

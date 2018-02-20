@@ -6,8 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kataras/iris/context"
+	"github.com/kataras/golog"
 
+	"github.com/kataras/iris/context"
 	"github.com/kataras/iris/core/errors"
 	"github.com/kataras/iris/core/netutil"
 	"github.com/kataras/iris/core/router/node"
@@ -136,7 +137,9 @@ func (h *routerHandler) Build(provider RoutesProvider) error {
 		if err := h.addRoute(r); err != nil {
 			// node errors:
 			rp.Add("%v -> %s", err, r.String())
+			continue
 		}
+		golog.Debugf(r.Trace())
 	}
 
 	return rp.Return()

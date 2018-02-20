@@ -16,14 +16,6 @@
 
 [[constraint]]
   branch = "master"
-  name = "github.com/boltdb/bolt"
-
-[[constraint]]
-  branch = "master"
-  name = "github.com/dgraph-io/badger"
-
-[[constraint]]
-  branch = "master"
   name = "github.com/eknkc/amber"
 
 [[constraint]]
@@ -33,14 +25,6 @@
 [[constraint]]
   branch = "master"
   name = "github.com/flosch/pongo2"
-
-[[constraint]]
-  branch = "master"
-  name = "github.com/garyburd/redigo"
-
-[[constraint]]
-  name = "github.com/gorilla/websocket"
-  version = "1.2.0"
 
 [[constraint]]
   branch = "master"
@@ -59,6 +43,10 @@
   name = "github.com/kataras/golog"
 
 [[constraint]]
+  branch = "master"
+  name = "github.com/kataras/survey"
+
+[[constraint]]
   name = "github.com/klauspost/compress"
   version = "1.2.1"
 
@@ -67,20 +55,16 @@
   name = "github.com/microcosm-cc/bluemonday"
 
 [[constraint]]
-  name = "github.com/russross/blackfriday"
-  version = "2.0.0"
+  branch = "v2"
+  name = "gopkg.in/russross/blackfriday.v2"
 
 [[constraint]]
   branch = "master"
   name = "github.com/ryanuber/columnize"
 
 [[constraint]]
-  branch = "master"
   name = "github.com/satori/go.uuid"
-
-[[constraint]]
-  branch = "master"
-  name = "github.com/syndtr/goleveldb"
+  version = "1.2.0"
 
 [[constraint]]
   branch = "master"

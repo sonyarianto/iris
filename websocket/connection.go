@@ -67,8 +67,8 @@ func (r *ConnectionValues) Reset() {
 	*r = (*r)[:0]
 }
 
-// UnderlineConnection is used for compatible with fasthttp and net/http underline websocket libraries
-// we only need ~8 funcs from websocket.Conn so:
+// UnderlineConnection is the underline connection, nothing to think about,
+// it's used internally mostly but can be used for extreme cases with other libraries.
 type UnderlineConnection interface {
 	// SetWriteDeadline sets the write deadline on the underlying network
 	// connection. After a write has timed out, the websocket state is corrupt and
@@ -118,23 +118,28 @@ type UnderlineConnection interface {
 // -------------------------------------------------------------------------------------
 
 type (
-	// DisconnectFunc is the callback which fires when a client/connection closed
+	// DisconnectFunc is the callback which is fired when a client/connection closed
 	DisconnectFunc func()
-	// LeaveRoomFunc is the callback which fires when a client/connection leaves from any room.
+	// LeaveRoomFunc is the callback which is fired when a client/connection leaves from any room.
 	// This is called automatically when client/connection disconnected
 	// (because websocket server automatically leaves from all joined rooms)
 	LeaveRoomFunc func(roomName string)
-	// ErrorFunc is the callback which fires when an error happens
+	// ErrorFunc is the callback which fires whenever an error occurs
 	ErrorFunc (func(string))
 	// NativeMessageFunc is the callback for native websocket messages, receives one []byte parameter which is the raw client's message
 	NativeMessageFunc func([]byte)
 	// MessageFunc is the second argument to the Emitter's Emit functions.
 	// A callback which should receives one parameter of type string, int, bool or any valid JSON/Go struct
 	MessageFunc interface{}
+	// PingFunc is the callback which fires each ping
+	PingFunc func()
 	// Connection is the front-end API that you will use to communicate with the client side
 	Connection interface {
 		// Emitter implements EmitMessage & Emit
 		Emitter
+		// Err is not nil if the upgrader failed to upgrade http to websocket connection.
+		Err() error
+
 		// ID returns the connection's identifier
 		ID() string
 
@@ -150,24 +155,29 @@ type (
 		// then  you use it to receive user information, for example: from headers
 		Context() context.Context
 
-		// OnDisconnect registers a callback which fires when this connection is closed by an error or manual
+		// OnDisconnect registers a callback which is fired when this connection is closed by an error or manual
 		OnDisconnect(DisconnectFunc)
 		// OnError registers a callback which fires when this connection occurs an error
 		OnError(ErrorFunc)
-		// FireStatusCode can be used to send a custom error message to the connection
+		// OnPing  registers a callback which fires on each ping
+		OnPing(PingFunc)
+		// FireOnError can be used to send a custom error message to the connection
 		//
-		// It does nothing more than firing the OnError listeners. It doesn't sends anything to the client.
+		// It does nothing more than firing the OnError listeners. It doesn't send anything to the client.
 		FireOnError(errorMessage string)
-		// To defines where server should send a message
-		// returns an emitter to send messages
+		// To defines on what "room" (see Join) the server should send a message
+		// returns an Emmiter(`EmitMessage` & `Emit`) to send messages.
 		To(string) Emitter
 		// OnMessage registers a callback which fires when native websocket message received
 		OnMessage(NativeMessageFunc)
-		// On registers a callback to a particular event which fires when a message to this event received
+		// On registers a callback to a particular event which is fired when a message to this event is received
 		On(string, MessageFunc)
-		// Join join a connection to a room, it doesn't check if connection is already there, so care
+		// Join registers this connection to a room, if it doesn't exist then it creates a new. One room can have one or more connections. One connection can be joined to many rooms. All connections are joined to a room specified by their `ID` automatically.
 		Join(string)
-		// Leave removes a connection from a room
+		// IsJoined returns true when this connection is joined to the room, otherwise false.
+		// It Takes the room name as its input parameter.
+		IsJoined(roomName string) bool
+		// Leave removes this connection entry from a room
 		// Returns true if the connection has actually left from the particular room.
 		Leave(string) bool
 		// OnLeave registers a callback which fires when this connection left from any joined room.
@@ -177,6 +187,11 @@ type (
 		// Note: the callback(s) called right before the server deletes the connection from the room
 		// so the connection theoretical can still send messages to its room right before it is being disconnected.
 		OnLeave(roomLeaveCb LeaveRoomFunc)
+		// Wait starts the pinger and the messages reader,
+		// it's named as "Wait" because it should be called LAST,
+		// after the "On" events IF server's `Upgrade` is used,
+		// otherise you don't have to call it because the `Handler()` does it automatically.
+		Wait()
 		// Disconnect disconnects the client, close the underline websocket conn and removes it from the conn list
 		// returns the error, if any, from the underline connection
 		Disconnect() error
@@ -193,16 +208,18 @@ type (
 	}
 
 	connection struct {
+		err                      error
 		underline                UnderlineConnection
 		id                       string
 		messageType              int
-		pinger                   *time.Ticker
 		disconnected             bool
 		onDisconnectListeners    []DisconnectFunc
 		onRoomLeaveListeners     []LeaveRoomFunc
 		onErrorListeners         []ErrorFunc
+		onPingListeners          []PingFunc
 		onNativeMessageListeners []NativeMessageFunc
 		onEventListeners         map[string][]MessageFunc
+		started                  bool
 		// these were  maden for performance only
 		self      Emitter // pre-defined emitter than sends message to its self client
 		broadcast Emitter // pre-defined emitter that sends message to all except this
@@ -233,6 +250,7 @@ func newConnection(ctx context.Context, s *Server, underlineConn UnderlineConnec
 		onErrorListeners:         make([]ErrorFunc, 0),
 		onNativeMessageListeners: make([]NativeMessageFunc, 0),
 		onEventListeners:         make(map[string][]MessageFunc, 0),
+		started:                  false,
 		ctx:                      ctx,
 		server:                   s,
 	}
@@ -248,9 +266,14 @@ func newConnection(ctx context.Context, s *Server, underlineConn UnderlineConnec
 	return c
 }
 
+// Err is not nil if the upgrader failed to upgrade http to websocket connection.
+func (c *connection) Err() error {
+	return c.err
+}
+
 // write writes a raw websocket message with a specific type to the client
 // used by ping messages and any CloseMessage types.
-func (c *connection) write(websocketMessageType int, data []byte) {
+func (c *connection) write(websocketMessageType int, data []byte) error {
 	// for any-case the app tries to write from different goroutines,
 	// we must protect them because they're reporting that as bug...
 	c.writerMu.Lock()
@@ -266,6 +289,7 @@ func (c *connection) write(websocketMessageType int, data []byte) {
 		// if failed then the connection is off, fire the disconnect
 		c.Disconnect()
 	}
+	return err
 }
 
 // writeDefault is the same as write but the message type is the configured by c.messageType
@@ -297,17 +321,31 @@ func (c *connection) startPinger() {
 
 	c.underline.SetPingHandler(pingHandler)
 
-	// start a new timer ticker based on the configuration
-	c.pinger = time.NewTicker(c.server.config.PingPeriod)
-
 	go func() {
 		for {
-			// wait for each tick
-			<-c.pinger.C
+			// using sleep avoids the ticker error that causes a memory leak
+			time.Sleep(c.server.config.PingPeriod)
+			if c.disconnected {
+				// verifies if already disconected
+				break
+			}
+			//fire all OnPing methods
+			c.fireOnPing()
 			// try to ping the client, if failed then it disconnects
-			c.write(websocket.PingMessage, []byte{})
+			err := c.write(websocket.PingMessage, []byte{})
+			if err != nil {
+				// must stop to exit the loop and finish the go routine
+				break
+			}
 		}
 	}()
+}
+
+func (c *connection) fireOnPing() {
+	// fire the onPingListeners
+	for i := range c.onPingListeners {
+		c.onPingListeners[i]()
+	}
 }
 
 func (c *connection) startReader() {
@@ -425,6 +463,10 @@ func (c *connection) OnError(cb ErrorFunc) {
 	c.onErrorListeners = append(c.onErrorListeners, cb)
 }
 
+func (c *connection) OnPing(cb PingFunc) {
+	c.onPingListeners = append(c.onPingListeners, cb)
+}
+
 func (c *connection) FireOnError(errorMessage string) {
 	for _, cb := range c.onErrorListeners {
 		cb(errorMessage)
@@ -467,6 +509,10 @@ func (c *connection) Join(roomName string) {
 	c.server.Join(roomName, c.id)
 }
 
+func (c *connection) IsJoined(roomName string) bool {
+	return c.server.IsJoined(roomName, c.id)
+}
+
 func (c *connection) Leave(roomName string) bool {
 	return c.server.Leave(roomName, c.id)
 }
@@ -485,6 +531,22 @@ func (c *connection) fireOnLeave(roomName string) {
 	for i := range c.onRoomLeaveListeners {
 		c.onRoomLeaveListeners[i](roomName)
 	}
+}
+
+// Wait starts the pinger and the messages reader,
+// it's named as "Wait" because it should be called LAST,
+// after the "On" events IF server's `Upgrade` is used,
+// otherise you don't have to call it because the `Handler()` does it automatically.
+func (c *connection) Wait() {
+	if c.started {
+		return
+	}
+	c.started = true
+	// start the ping
+	c.startPinger()
+
+	// start the messages reader
+	c.startReader()
 }
 
 func (c *connection) Disconnect() error {

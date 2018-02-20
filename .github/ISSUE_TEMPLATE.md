@@ -1,2 +1,8 @@
-Documentation for the _iris_ project can be found at
-<https://github.com/kataras/iris#-learn>.
+Examples for the Iris project can be found at
+<https://github.com/kataras/iris/tree/master/_examples>.
+
+Documentation for the Iris project can be found at
+<https://godoc.org/github.com/kataras/iris>.
+
+Love iris? Please consider supporting the project:
+👉  https://iris-go.com/donate

@@ -11,22 +11,25 @@ It doesn't always contain the "best ways" but it does cover each important featu
 - [Hello world!](hello-world/main.go)
 - [Glimpse](overview/main.go)
 - [Tutorial: Online Visitors](tutorial/online-visitors/main.go)
+- [Tutorial: A Todo MVC Application using Iris and Vue.js](https://hackernoon.com/a-todo-mvc-application-using-iris-and-vue-js-5019ff870064)
 - [Tutorial: URL Shortener using BoltDB](https://medium.com/@kataras/a-url-shortener-service-using-go-iris-and-bolt-4182f0b00ae7)
 - [Tutorial: How to turn your Android Device into a fully featured Web Server (**MUST**)](https://twitter.com/ThePracticalDev/status/892022594031017988)
 - [POC: Convert the medium-sized project "Parrot" from native to Iris](https://github.com/iris-contrib/parrot)
 - [POC: Isomorphic react/hot reloadable/redux/css-modules starter kit](https://github.com/kataras/iris-starter-kit)
 - [Tutorial: DropzoneJS Uploader](tutorial/dropzonejs)
+- [Tutorial: Caddy](tutorial/caddy)
+- [Tutorial:Iris Go Framework + MongoDB](https://medium.com/go-language/iris-go-framework-mongodb-552e349eab9c)
 
 ### Structuring
 
 Nothing stops you from using your favorite folder structure. Iris is a low level web framework, it has got MVC first-class support but it doesn't limit your folder structure, this is your choice.
 
-Structuring depends on your own needs. We can't tell you how to design your own application for sure but you're free to take a closer look to the examples below; you may find something useful that you can borrow for your app
+Structuring depends on your own needs. We can't tell you how to design your own application for sure but you're free to take a closer look to the examples below; you may find something useful that you can borrow for your app;
 
-- [Example 1](mvc/login)
-- [Example 2](structuring/mvc)
-- [Example 3](structuring/handler-based)
-- [Example 4](mvc/overview)
+- [Bootstrapper](structuring/bootstrap)
+- [MVC with Repository and Service layer Overview](structuring/mvc-plus-repository-and-service-layers)
+- [Login (MVC with Single Responsibility package)](structuring/login-mvc-single-responsibility-package)
+- [Login (MVC with Datamodels, Datasource, Repository and Service layer)](structuring/login-mvc)
 
 ### HTTP Listening
 
@@ -52,6 +55,7 @@ Structuring depends on your own needs. We can't tell you how to design your own 
 - [Functional](configuration/functional/main.go)
 - [From Configuration Struct](configuration/from-configuration-structure/main.go)
 - [Import from YAML file](configuration/from-yaml-file/main.go)
+    * [Share Configuration between multiple instances](configuration/from-yaml-file/shared-configuration/main.go)
 - [Import from TOML file](configuration/from-toml-file/main.go)
 
 ### Routing, Grouping, Dynamic Path Parameters, "Macros" and Custom Context
@@ -108,6 +112,11 @@ Navigate through examples for a better understanding.
     * [per-route](routing/writing-a-middleware/per-route/main.go)
     * [globally](routing/writing-a-middleware/globally/main.go)
 
+### hero
+
+- [Basic](hero/basic/main.go)
+- [Overview](hero/overview)
+
 ### MVC
 
 ![](mvc/web_mvc_diagram.png)
@@ -122,43 +131,82 @@ with the fastest possible execution.
 
 All HTTP Methods are supported, for example if want to serve `GET`
 then the controller should have a function named `Get()`,
-you can define more than one method function to serve in the same Controller struct.
+you can define more than one method function to serve in the same Controller.
+
+Serve custom controller's struct's methods as handlers with custom paths(even with regex parametermized path) via the `BeforeActivation` custom event callback, per-controller. Example:
+
+```go
+import (
+    "github.com/kataras/iris"
+    "github.com/kataras/iris/mvc"
+)
+
+func main() {
+    app := iris.New()
+    mvc.Configure(app.Party("/root"), myMVC)
+    app.Run(iris.Addr(":8080"))
+}
+
+func myMVC(app *mvc.Application) {
+    // app.Register(...)
+    // app.Router.Use/UseGlobal/Done(...)
+    app.Handle(new(MyController))
+}
+
+type MyController struct {}
+
+func (m *MyController) BeforeActivation(b mvc.BeforeActivation) {
+    // b.Dependencies().Add/Remove
+    // b.Router().Use/UseGlobal/Done // and any standard API call you already know
+
+    // 1-> Method
+    // 2-> Path
+    // 3-> The controller's function name to be parsed as handler
+    // 4-> Any handlers that should run before the MyCustomHandler
+    b.Handle("GET", "/something/{id:long}", "MyCustomHandler", anyMiddleware...)
+}
+
+// GET: http://localhost:8080/root
+func (m *MyController) Get() string { return "Hey" }
+
+// GET: http://localhost:8080/root/something/{id:long}
+func (m *MyController) MyCustomHandler(id int64) string { return "MyCustomHandler says Hey" }
+```
 
 Persistence data inside your Controller struct (share data between requests)
-via `iris:"persistence"` tag right to the field or Bind using `app.Controller("/" , new(myController), theBindValue)`.
+by defining services to the Dependencies or have a `Singleton` controller scope.
 
-Models inside your Controller struct (set-ed at the Method function and rendered by the View)
-via `iris:"model"` tag right to the field, i.e ```User UserModel `iris:"model" name:"user"` ``` view will recognise it as `{{.user}}`.
-If `name` tag is missing then it takes the field's name, in this case the `"User"`.
+Share the dependencies between controllers or register them on a parent MVC Application, and ability
+to modify dependencies per-controller on the `BeforeActivation` optional event callback inside a Controller,
+i.e `func(c *MyController) BeforeActivation(b mvc.BeforeActivation) { b.Dependencies().Add/Remove(...) }`.
 
-Access to the request path and its parameters via the `Path and Params` fields.
+Access to the `Context` as a controller's field(no manual binding is neede) i.e `Ctx iris.Context` or via a method's input argument, i.e `func(ctx iris.Context, otherArguments...)`.
 
-Access to the template file that should be rendered via the `Tmpl` field.
+Models inside your Controller struct (set-ed at the Method function and rendered by the View).
+You can return models from a controller's method or set a field in the request lifecycle
+and return that field to another method, in the same request lifecycle.
 
-Access to the template data that should be rendered inside
-the template file via `Data` field.
-
-Access to the template layout via the `Layout` field.
-
-Access to the low-level `iris.Context/context.Context` via the `Ctx` field.
-
-Flow as you used to, `Controllers` can be registered to any `Party`,
-including Subdomains, the Party's begin and done handlers work as expected.
+Flow as you used to, mvc application has its own `Router` which is a type of `iris/router.Party`, the standard iris api.
+`Controllers` can be registered to any `Party`, including Subdomains, the Party's begin and done handlers work as expected.
 
 Optional `BeginRequest(ctx)` function to perform any initialization before the method execution,
 useful to call middlewares or when many methods use the same collection of data.
 
 Optional `EndRequest(ctx)` function to perform any finalization after any method executed.
 
-Inheritance, see for example our `mvc.SessionController`, it has the `mvc.Controller` as an embedded field
-and it adds its logic to its `BeginRequest`, [here](https://github.com/kataras/iris/blob/master/mvc/session_controller.go). 
+Inheritance, recursively, see for example our `mvc.SessionController`, it has the `Session *sessions.Session` and `Manager *sessions.Sessions` as embedded fields
+which are filled by its `BeginRequest`, [here](https://github.com/kataras/iris/blob/master/mvc/session_controller.go).
+This is just an example, you could use the `sessions.Session` which returned from the manager's `Start` as a dynamic dependency to the MVC Application, i.e
+`mvcApp.Register(sessions.New(sessions.Config{Cookie: "iris_session_id"}).Start)`.
 
-Register one or more relative paths and able to get path parameters, i.e
+Access to the dynamic path parameters via the controller's methods' input arguments, no binding is needed.
+When you use the Iris' default syntax to parse handlers from a controller, you need to suffix the methods
+with the `By` word, uppercase is a new sub path. Example:
 
-If `app.Controller("/user", new(user.Controller))`
+If `mvc.New(app.Party("/user")).Handle(new(user.Controller))`
 
-- `func(*Controller) Get()` - `GET:/user` , as usual.
-- `func(*Controller) Post()` - `POST:/user`, as usual.
+- `func(*Controller) Get()` - `GET:/user`.
+- `func(*Controller) Post()` - `POST:/user`.
 - `func(*Controller) GetLogin()` - `GET:/user/login`
 - `func(*Controller) PostLogin()` - `POST:/user/login`
 - `func(*Controller) GetProfileFollowers()` - `GET:/user/profile/followers`
@@ -166,11 +214,11 @@ If `app.Controller("/user", new(user.Controller))`
 - `func(*Controller) GetBy(id int64)` - `GET:/user/{param:long}`
 - `func(*Controller) PostBy(id int64)` - `POST:/user/{param:long}`
 
-If `app.Controller("/profile", new(profile.Controller))`
+If `mvc.New(app.Party("/profile")).Handle(new(profile.Controller))`
 
 - `func(*Controller) GetBy(username string)` - `GET:/profile/{param:string}`
 
-If `app.Controller("/assets", new(file.Controller))`
+If `mvc.New(app.Party("/assets")).Handle(new(file.Controller))`
 
 - `func(*Controller) GetByWildard(path string)` - `GET:/assets/{param:path}`
 
@@ -185,21 +233,19 @@ func(c *ExampleController) Get() string |
                                 int |
                                 (int, string) |
                                 (string, error) |
-                                bool |
-                                (any, bool) |
-                                (bool, any) |
                                 error |
                                 (int, error) |
+                                (any, bool) |
                                 (customStruct, error) |
                                 customStruct |
                                 (customStruct, int) |
                                 (customStruct, string) |
-                                mvc.Result or (mvc.Result, error) and so on...
+                                mvc.Result or (mvc.Result, error)
 ```
 
-where [mvc.Result](https://github.com/kataras/iris/blob/master/mvc/method_result.go) is an interface which contains only that function: `Dispatch(ctx iris.Context)`.
+where [mvc.Result](https://github.com/kataras/iris/blob/master/mvc/func_result.go) is an interface which contains only that function: `Dispatch(ctx iris.Context)`.
 
-**Using Iris MVC for code reuse** 
+## Using Iris MVC for code reuse
 
 By creating components that are independent of one another, developers are able to reuse components quickly and easily in other applications. The same (or similar) view for one application can be refactored for another application with different data because the view is simply handling how the data is being displayed to the user.
 
@@ -209,26 +255,20 @@ Follow the examples below,
 
 - [Hello world](mvc/hello-world/main.go) **UPDATED**
 - [Session Controller](mvc/session-controller/main.go) **UPDATED**
-- [Overview - Plus Repository and Service layers](mvc/overview) **NEW**
-- [Login showcase - Plus Repository and Service layers](mvc/login) **NEW**
-
-<!-- 
-Why updated?
-Old method works, as promised no breaking changes.
-But mvc.C as controller marker and mvc.Result on method functions return value
-is more lightweight and faster than `mvc.Controller` because `mvc.Controller` initializes
-some fields like `Data, Path`... and Data is a map even if not used, at the opossite hand
-`mvc.C` just initializes the context `Ctx` field, the dev has all the `mvc.Controller`'s features
-by the `mvc.Result` built'n types like `mvc.Response` and `mvc.View` PLUS she/he can
-convert any custom type into a response dispatcher by implementing the `mvc.Result` interface.  
--->
+- [Overview - Plus Repository and Service layers](mvc/overview) **UPDATED**
+- [Login showcase - Plus Repository and Service layers](mvc/login) **UPDATED**
+- [Singleton](mvc/singleton) **NEW**
+- [Websocket Controller](mvc/websocket) **NEW**
+- [Register Middleware](mvc/middleware) **NEW**
+- [Vue.js Todo MVC](tutorial/vuejs-todo-mvc) **NEW**
 
 ### Subdomains
 
 - [Single](subdomains/single/main.go)
 - [Multi](subdomains/multi/main.go)
 - [Wildcard](subdomains/wildcard/main.go)
-- [WWW](subdomains/www/main.go) 
+- [WWW](subdomains/www/main.go)
+- [Redirect fast](subdomains/redirect/main.go)
 
 ### Convert `http.Handler/HandlerFunc`
 
@@ -254,15 +294,15 @@ convert any custom type into a response dispatcher by implementing the `mvc.Resu
 - [The `url` tmpl func](view/template_html_4/main.go)
 - [Inject Data Between Handlers](view/context-view-data/main.go)
 - [Embedding Templates Into App Executable File](view/embedding-templates-into-app/main.go)
+- [Write to a custom `io.Writer`](view/write-to)
 
-
-You can serve [quicktemplate](https://github.com/valyala/quicktemplate) files too, simply by using the `context#ResponseWriter`, take a look at the [http_responsewriter/quicktemplate](http_responsewriter/quicktemplate) example.
+You can serve [quicktemplate](https://github.com/valyala/quicktemplate) and [hero templates](https://github.com/shiyanhui/hero/hero) files too, simply by using the `context#ResponseWriter`, take a look at the [http_responsewriter/quicktemplate](http_responsewriter/quicktemplate) and [http_responsewriter/herotemplate](http_responsewriter/herotemplate) examples.
 
 ### Authentication
 
 - [Basic Authentication](authentication/basicauth/main.go)
 - [OAUth2](authentication/oauth2/main.go)
-- [JWT](https://github.com/iris-contrib/middleware/blob/master/jwt/_example/main.go)
+- [JWT](experimental-handlers/jwt/main.go)
 - [Sessions](#sessions)
 
 ### File Server
@@ -274,19 +314,23 @@ You can serve [quicktemplate](https://github.com/valyala/quicktemplate) files to
 - Single Page Applications
     * [single Page Application](file-server/single-page-application/basic/main.go)
     * [embedded Single Page Application](file-server/single-page-application/embedded-single-page-application/main.go)
+    * [embedded Single Page Application with other routes](file-server/single-page-application/embedded-single-page-application-with-other-routes/main.go)
 
 ### How to Read from `context.Request() *http.Request`
 
 - [Bind JSON](http_request/read-json/main.go)
 - [Bind Form](http_request/read-form/main.go)
-- [Upload/Read Files](http_request/upload-files/main.go)
+- [Upload/Read File](http_request/upload-file/main.go)
+- [Upload multiple files with an easy way](http_request/upload-files/main.go)
 
 > The `context.Request()` returns the same *http.Request you already know, these examples show some places where the  Context uses this object. Besides that you can use it as you did before iris.
 
 ### How to Write to `context.ResponseWriter() http.ResponseWriter`
 
 - [Write `valyala/quicktemplate` templates](http_responsewriter/quicktemplate)
+- [Write `shiyanhui/hero` templates](http_responsewriter/herotemplate)
 - [Text, Markdown, HTML, JSON, JSONP, XML, Binary](http_responsewriter/write-rest/main.go)
+- [Write Gzip](http_responsewriter/write-gzip/main.go)
 - [Stream Writer](http_responsewriter/stream-writer/main.go)
 - [Transactions](http_responsewriter/transactions/main.go)
 
@@ -304,7 +348,20 @@ You can serve [quicktemplate](https://github.com/valyala/quicktemplate) files to
 - [Recovery](miscellaneous/recover/main.go)
 - [Profiling (pprof)](miscellaneous/pprof/main.go)
 - [Internal Application File Logger](miscellaneous/file-logger/main.go)
-- [Google reCAPTCHA](miscellaneous/recaptcha/main.go)
+- [Google reCAPTCHA](miscellaneous/recaptcha/main.go) 
+
+### Experimental Handlers
+
+- [Casbin wrapper](experimental-handlers/casbin/wrapper/main.go)
+- [Casbin middleware](experimental-handlers/casbin/middleware/main.go)
+- [Cloudwatch](experimental-handlers/cloudwatch/simple/main.go)
+- [CORS](experimental-handlers/cors/simple/main.go)
+- [JWT](experimental-handlers/jwt/main.go)
+- [Newrelic](experimental-handlers/newrelic/simple/main.go)
+- [Prometheus](experimental-handlers/prometheus/simple/main.go)
+- [Secure](experimental-handlers/secure/simple/main.go)
+- [Tollboothic](experimental-handlers/tollboothic/limit-handler/main.go)
+- [Cross-Site Request Forgery Protection](experimental-handlers/csrf/main.go)
 
 #### More
 
@@ -325,6 +382,7 @@ The `httptest` package is your way for end-to-end HTTP testing, it uses the http
 iris cache library lives on its own [package](https://github.com/kataras/iris/tree/master/cache).
 
 - [Simple](cache/simple/main.go)
+- [Client-Side (304)](cache/client-side/main.go) - part of the iris context core
 
 > You're free to use your own favourite caching package if you'd like so.
 

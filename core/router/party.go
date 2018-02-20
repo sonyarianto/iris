@@ -2,7 +2,8 @@ package router
 
 import (
 	"github.com/kataras/iris/context"
-	"github.com/kataras/iris/mvc/activator"
+	"github.com/kataras/iris/core/errors"
+	"github.com/kataras/iris/core/router/macro"
 )
 
 // Party is here to separate the concept of
@@ -13,7 +14,23 @@ import (
 //
 // Look the "APIBuilder" for its implementation.
 type Party interface {
-	// Party creates and returns a new child Party with the following features.
+	// GetRelPath returns the current party's relative path.
+	// i.e:
+	// if r := app.Party("/users"), then the `r.GetRelPath()` is the "/users".
+	// if r := app.Party("www.") or app.Subdomain("www") then the `r.GetRelPath()` is the "www.".
+	GetRelPath() string
+	// GetReporter returns the reporter for adding errors
+	GetReporter() *errors.Reporter
+	// Macros returns the macro map which is responsible
+	// to register custom macro functions for all routes.
+	//
+	// Learn more at:  https://github.com/kataras/iris/tree/master/_examples/routing/dynamic-path
+	Macros() *macro.Map
+
+	// Party groups routes which may have the same prefix and share same handlers,
+	// returns that new rich subrouter.
+	//
+	// You can even declare a subdomain with relativePath as "mysub." or see `Subdomain`.
 	Party(relativePath string, middleware ...context.Handler) Party
 	// PartyFunc same as `Party`, groups routes that share a base path or/and same handlers.
 	// However this function accepts a function that receives this created Party instead.
@@ -36,17 +53,21 @@ type Party interface {
 	// this specific "subdomain".
 	//
 	// If called from a child party then the subdomain will be prepended to the path instead of appended.
-	// So if app.Subdomain("admin.").Subdomain("panel.") then the result is: "panel.admin.".
+	// So if app.Subdomain("admin").Subdomain("panel") then the result is: "panel.admin.".
 	Subdomain(subdomain string, middleware ...context.Handler) Party
 
 	// Use appends Handler(s) to the current Party's routes and child routes.
 	// If the current Party is the root, then it registers the middleware to all child Parties' routes too.
 	Use(middleware ...context.Handler)
 
-	// Done appends to the very end, Handler(s) to the current Party's routes and child routes
+	// Done appends to the very end, Handler(s) to the current Party's routes and child routes.
 	// The difference from .Use is that this/or these Handler(s) are being always running last.
 	Done(handlers ...context.Handler)
-
+	// Reset removes all the begin and done handlers that may derived from the parent party via `Use` & `Done`,
+	// note that the `Reset` will not reset the handlers that are registered via `UseGlobal` & `DoneGlobal`.
+	//
+	// Returns this Party.
+	Reset() Party
 	// Handle registers a route to the server's router.
 	// if empty method is passed then handler(s) are being registered to all methods, same as .Any.
 	//
@@ -116,63 +137,6 @@ type Party interface {
 	// Any registers a route for ALL of the http methods
 	// (Get,Post,Put,Head,Patch,Options,Connect,Delete).
 	Any(registeredPath string, handlers ...context.Handler) []*Route
-
-	// Controller registers a `Controller` instance and returns the registered Routes.
-	// The "controller" receiver should embed a field of `Controller` in order
-	// to be compatible Iris `Controller`.
-	//
-	// It's just an alternative way of building an API for a specific
-	// path, the controller can register all type of http methods.
-	//
-	// Keep note that controllers are bit slow
-	// because of the reflection use however it's as fast as possible because
-	// it does preparation before the serve-time handler but still
-	// remains slower than the low-level handlers
-	// such as `Handle, Get, Post, Put, Delete, Connect, Head, Trace, Patch`.
-	//
-	//
-	// All fields that are tagged with iris:"persistence"` or binded
-	// are being persistence and kept the same between the different requests.
-	//
-	// An Example Controller can be:
-	//
-	// type IndexController struct {
-	// 	Controller
-	// }
-	//
-	// func (c *IndexController) Get() {
-	// 	c.Tmpl = "index.html"
-	// 	c.Data["title"] = "Index page"
-	// 	c.Data["message"] = "Hello world!"
-	// }
-	//
-	// Usage: app.Controller("/", new(IndexController))
-	//
-	//
-	// Another example with bind:
-	//
-	// type UserController struct {
-	// 	Controller
-	//
-	// 	DB        *DB
-	// 	CreatedAt time.Time
-	//
-	// }
-	//
-	// // Get serves using the User controller when HTTP Method is "GET".
-	// func (c *UserController) Get() {
-	// 	c.Tmpl = "user/index.html"
-	// 	c.Data["title"] = "User Page"
-	// 	c.Data["username"] = "kataras " + c.Params.Get("userid")
-	// 	c.Data["connstring"] = c.DB.Connstring
-	// 	c.Data["uptime"] = time.Now().Sub(c.CreatedAt).Seconds()
-	// }
-	//
-	// Usage: app.Controller("/user/{id:int}", new(UserController), db, time.Now())
-	// Note: Binded values of context.Handler type are being recognised as middlewares by the router.
-	//
-	// Read more at `/mvc#Controller`.
-	Controller(relativePath string, controller activator.BaseController, bindValues ...interface{}) []*Route
 
 	// StaticHandler returns a new Handler which is ready
 	// to serve all kind of static files.
@@ -251,15 +215,19 @@ type Party interface {
 	// Returns the GET *Route.
 	StaticWeb(requestPath string, systemPath string) *Route
 
-	// Layout oerrides the parent template layout with a more specific layout for this Party
-	// returns this Party, to continue as normal
+	// Layout overrides the parent template layout with a more specific layout for this Party.
+	// It returns the current Party.
+	//
+	// The "tmplLayoutFile" should be a relative path to the templates dir.
 	// Usage:
+	//
 	// app := iris.New()
+	// app.RegisterView(iris.$VIEW_ENGINE("./views", ".$extension"))
 	// my := app.Party("/my").Layout("layouts/mylayout.html")
-	// 	{
-	// 		my.Get("/", func(ctx context.Context) {
-	// 			ctx.MustRender("page1.html", nil)
-	// 		})
-	// 	}
+	// 	my.Get("/", func(ctx iris.Context) {
+	// 		ctx.View("page1.html")
+	// 	})
+	//
+	// Examples: https://github.com/kataras/iris/tree/master/_examples/view
 	Layout(tmplLayoutFile string) Party
 }

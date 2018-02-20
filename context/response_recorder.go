@@ -39,7 +39,7 @@ type ResponseRecorder struct {
 	headers http.Header
 }
 
-var _ ResponseWriter = &ResponseRecorder{}
+var _ ResponseWriter = (*ResponseRecorder)(nil)
 
 // Naive returns the simple, underline and original http.ResponseWriter
 // that backends this response writer.
@@ -189,7 +189,7 @@ func (w *ResponseRecorder) WriteTo(res ResponseWriter) {
 
 	if to, ok := res.(*ResponseRecorder); ok {
 
-		// set the status code, to is first ( probably an error >=400)
+		// set the status code, to is first ( probably an error? (context.StatusCodeNotSuccessful, defaults to < 200 || >= 400).
 		if statusCode := w.ResponseWriter.StatusCode(); statusCode == defaultStatusCode {
 			to.WriteHeader(statusCode)
 		}

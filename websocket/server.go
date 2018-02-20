@@ -106,10 +106,10 @@ type (
 		config                Config
 		connections           connections
 		rooms                 map[string][]string // by default a connection is joined to a room which has the connection id as its name
-		mu                    sync.Mutex          // for rooms
+		mu                    sync.RWMutex        // for rooms
 		onConnectionListeners []ConnectionFunc
 		//connectionPool        sync.Pool // sadly we can't make this because the websocket connection is live until is closed.
-		handler context.Handler
+		upgrader websocket.Upgrader
 	}
 )
 
@@ -119,10 +119,20 @@ type (
 //
 // To serve the built'n javascript client-side library look the `websocket.ClientHandler`.
 func New(cfg Config) *Server {
+	cfg = cfg.Validate()
 	return &Server{
-		config: cfg.Validate(),
+		config: cfg,
 		rooms:  make(map[string][]string, 0),
 		onConnectionListeners: make([]ConnectionFunc, 0),
+		upgrader: websocket.Upgrader{
+			HandshakeTimeout:  cfg.HandshakeTimeout,
+			ReadBufferSize:    cfg.ReadBufferSize,
+			WriteBufferSize:   cfg.WriteBufferSize,
+			Error:             cfg.Error,
+			CheckOrigin:       cfg.CheckOrigin,
+			Subprotocols:      cfg.Subprotocols,
+			EnableCompression: cfg.EnableCompression,
+		},
 	}
 }
 
@@ -135,40 +145,50 @@ func New(cfg Config) *Server {
 //
 // To serve the built'n javascript client-side library look the `websocket.ClientHandler`.
 func (s *Server) Handler() context.Handler {
-	// build the upgrader once
-	c := s.config
-
-	upgrader := websocket.Upgrader{
-		HandshakeTimeout:  c.HandshakeTimeout,
-		ReadBufferSize:    c.ReadBufferSize,
-		WriteBufferSize:   c.WriteBufferSize,
-		Error:             c.Error,
-		CheckOrigin:       c.CheckOrigin,
-		Subprotocols:      c.Subprotocols,
-		EnableCompression: c.EnableCompression,
-	}
-
 	return func(ctx context.Context) {
-		// Upgrade upgrades the HTTP Server connection to the WebSocket protocol.
-		//
-		// The responseHeader is included in the response to the client's upgrade
-		// request. Use the responseHeader to specify cookies (Set-Cookie) and the
-		// application negotiated subprotocol (Sec--Protocol).
-		//
-		// If the upgrade fails, then Upgrade replies to the client with an HTTP error
-		// response.
-		conn, err := upgrader.Upgrade(ctx.ResponseWriter(), ctx.Request(), ctx.ResponseWriter().Header())
-		if err != nil {
-			ctx.Application().Logger().Warnf("websocket error: %v\n", err)
-			ctx.StatusCode(503) // Status Service Unavailable
-			return
+		c := s.Upgrade(ctx)
+		// NOTE TO ME: fire these first BEFORE startReader and startPinger
+		// in order to set the events and any messages to send
+		// the startPinger will send the OK to the client and only
+		// then the client is able to send and receive from Server
+		// when all things are ready and only then. DO NOT change this order.
+
+		// fire the on connection event callbacks, if any
+		for i := range s.onConnectionListeners {
+			s.onConnectionListeners[i](c)
 		}
-		s.handleConnection(ctx, conn)
+
+		// start the ping and the messages reader
+		c.Wait()
 	}
 }
 
-// handleConnection creates & starts to listening to a new connection
-func (s *Server) handleConnection(ctx context.Context, websocketConn UnderlineConnection) {
+// Upgrade upgrades the HTTP Server connection to the WebSocket protocol.
+//
+// The responseHeader is included in the response to the client's upgrade
+// request. Use the responseHeader to specify cookies (Set-Cookie) and the
+// application negotiated subprotocol (Sec--Protocol).
+//
+// If the upgrade fails, then Upgrade replies to the client with an HTTP error
+// response and the return `Connection.Err()` is filled with that error.
+//
+// For a more high-level function use the `Handler()` and `OnConnecton` events.
+// This one does not starts the connection's writer and reader, so after your `On/OnMessage` events registration
+// the caller has to call the `Connection#Wait` function, otherwise the connection will be not handled.
+func (s *Server) Upgrade(ctx context.Context) Connection {
+	conn, err := s.upgrader.Upgrade(ctx.ResponseWriter(), ctx.Request(), ctx.ResponseWriter().Header())
+	if err != nil {
+		ctx.Application().Logger().Warnf("websocket error: %v\n", err)
+		ctx.StatusCode(503) // Status Service Unavailable
+		return &connection{err: err}
+	}
+
+	return s.handleConnection(ctx, conn)
+}
+
+// wrapConnection wraps an underline connection to an iris websocket connection.
+// It does NOT starts its writer, reader and event mux, the caller is responsible for that.
+func (s *Server) handleConnection(ctx context.Context, websocketConn UnderlineConnection) *connection {
 	// use the config's id generator (or the default) to create a websocket client/connection id
 	cid := s.config.IDGenerator(ctx)
 	// create the new connection
@@ -179,22 +199,7 @@ func (s *Server) handleConnection(ctx context.Context, websocketConn UnderlineCo
 	// join to itself
 	s.Join(c.ID(), c.ID())
 
-	// NOTE TO ME: fire these first BEFORE startReader and startPinger
-	// in order to set the events and any messages to send
-	// the startPinger will send the OK to the client and only
-	// then the client is able to send and receive from Server
-	// when all things are ready and only then. DO NOT change this order.
-
-	// fire the on connection event callbacks, if any
-	for i := range s.onConnectionListeners {
-		s.onConnectionListeners[i](c)
-	}
-
-	// start the ping
-	c.startPinger()
-
-	// start the messages reader
-	c.startReader()
+	return c
 }
 
 /* Notes:
@@ -251,20 +256,33 @@ func (s *Server) join(roomName string, connID string) {
 	s.rooms[roomName] = append(s.rooms[roomName], connID)
 }
 
+// IsJoined reports if a specific room has a specific connection into its values.
+// First parameter is the room name, second is the connection's id.
+//
+// It returns true when the "connID" is joined to the "roomName".
+func (s *Server) IsJoined(roomName string, connID string) bool {
+	s.mu.RLock()
+	room := s.rooms[roomName]
+	s.mu.RUnlock()
+
+	if room == nil {
+		return false
+	}
+
+	for _, connid := range room {
+		if connID == connid {
+			return true
+		}
+	}
+
+	return false
+}
+
 // LeaveAll kicks out a connection from ALL of its joined rooms
 func (s *Server) LeaveAll(connID string) {
 	s.mu.Lock()
-	for name, connectionIDs := range s.rooms {
-		for i := range connectionIDs {
-			if connectionIDs[i] == connID {
-				// fire the on room leave connection's listeners
-				s.connections.get(connID).fireOnLeave(name)
-				// the connection is inside this room, lets remove it
-				if i < len(s.rooms[name]) {
-					s.rooms[name] = append(s.rooms[name][:i], s.rooms[name][i+1:]...)
-				}
-			}
-		}
+	for name := range s.rooms {
+		s.leave(name, connID)
 	}
 	s.mu.Unlock()
 }
@@ -303,6 +321,30 @@ func (s *Server) leave(roomName string, connID string) (left bool) {
 		s.connections.get(connID).fireOnLeave(roomName)
 	}
 	return
+}
+
+// GetTotalConnections returns the number of total connections
+func (s *Server) GetTotalConnections() int {
+	s.mu.RLock()
+	l := len(s.connections)
+	s.mu.RUnlock()
+	return l
+}
+
+// GetConnections returns all connections
+func (s *Server) GetConnections() []Connection {
+	s.mu.RLock()
+	conns := make([]Connection, len(s.connections), len(s.connections))
+	for i, c := range s.connections {
+		conns[i] = c.value
+	}
+	s.mu.RUnlock()
+	return conns
+}
+
+// GetConnection returns single connection
+func (s *Server) GetConnection(key string) Connection {
+	return s.connections.get(key)
 }
 
 // GetConnectionsByRoom returns a list of Connection
@@ -378,8 +420,6 @@ func (s *Server) Disconnect(connID string) (err error) {
 	if c, ok := s.connections.remove(connID); ok {
 		if !c.disconnected {
 			c.disconnected = true
-			// stop the ping timer
-			c.pinger.Stop()
 
 			// fire the disconnect callbacks, if any
 			c.fireDisconnect()

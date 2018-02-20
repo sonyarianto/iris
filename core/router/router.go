@@ -83,7 +83,7 @@ func (router *Router) BuildRouter(cPool *context.Pool, requestHandler RequestHan
 // be aware to change the global variables of 'ParamStart' and 'ParamWildcardStart'.
 // can be used to implement a custom proxy or
 // a custom router which should work with raw ResponseWriter, *Request
-// instead of the Context(which agaiin, can be retrieved by the Cramework's context pool).
+// instead of the Context(which again, can be retrieved by the Framework's context pool).
 //
 // Note: Downgrade will by-pass the Wrapper, the caller is responsible for everything.
 // Downgrade is thread-safe.
@@ -114,12 +114,12 @@ type WrapperFunc func(w http.ResponseWriter, r *http.Request, firstNextIsTheRout
 //
 // Before build.
 func (router *Router) WrapRouter(wrapperFunc WrapperFunc) {
-	router.mu.Lock()
-	defer router.mu.Unlock()
-
 	if wrapperFunc == nil {
 		return
 	}
+
+	router.mu.Lock()
+	defer router.mu.Unlock()
 
 	if router.wrapperFunc != nil {
 		// wrap into one function, from bottom to top, end to begin.

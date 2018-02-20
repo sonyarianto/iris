@@ -39,7 +39,7 @@ type Encoding interface {
 }
 
 type (
-	// Config is the configuration for sessions. Please review it well before using sessions.
+	// Config is the configuration for sessions. Please read it before using sessions.
 	Config struct {
 		// Cookie string, the session's client cookie name, for example: "mysessionid"
 		//
@@ -55,6 +55,14 @@ type (
 		//
 		// Defaults to false.
 		CookieSecureTLS bool
+
+		// AllowReclaim will allow to
+		// Destroy and Start a session in the same request handler.
+		// All it does is that it removes the cookie for both `Request` and `ResponseWriter` while `Destroy`
+		// or add a new cookie to `Request` while `Start`.
+		//
+		// Defaults to false.
+		AllowReclaim bool
 
 		// Encode the cookie value if not nil.
 		// Should accept as first argument the cookie name (config.Cookie)
@@ -81,6 +89,8 @@ type (
 
 		// Encoding same as Encode and Decode but receives a single instance which
 		// completes the "CookieEncoder" interface, `Encode` and `Decode` functions.
+		//
+		// Defaults to nil.
 		Encoding Encoding
 
 		// Expires the duration of which the cookie must expires (created_time.Add(Expires)).

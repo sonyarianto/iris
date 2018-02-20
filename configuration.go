@@ -2,16 +2,101 @@ package iris
 
 import (
 	"io/ioutil"
+	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 
 	"github.com/BurntSushi/toml"
+	"github.com/kataras/golog"
 	"gopkg.in/yaml.v2"
 
 	"github.com/kataras/iris/context"
 	"github.com/kataras/iris/core/errors"
 )
 
+const globalConfigurationKeyword = "~"
+
+var globalConfigurationExisted = false
+
+// homeConfigurationFilename returns the physical location of the global configuration(yaml or toml) file.
+// This is useful when we run multiple iris servers that share the same
+// configuration, even with custom values at its "Other" field.
+// It will return a file location
+// which targets to $HOME or %HOMEDRIVE%+%HOMEPATH% + "iris" + the given "ext".
+func homeConfigurationFilename(ext string) string {
+	return filepath.Join(homeDir(), "iris"+ext)
+}
+
+func init() {
+	filename := homeConfigurationFilename(".yml")
+	c, err := parseYAML(filename)
+	if err != nil {
+		// this error will be occurred the first time that the configuration
+		// file doesn't exist.
+		// Create the YAML-ONLY global configuration file now using the default configuration 'c'.
+		// This is useful when we run multiple iris servers that share the same
+		// configuration, even with custom values at its "Other" field.
+		out, err := yaml.Marshal(&c)
+
+		if err == nil {
+			err = ioutil.WriteFile(filename, out, os.FileMode(0666))
+		}
+		if err != nil {
+			golog.Debugf("error while writing the global configuration field at: %s. Trace: %v\n", filename, err)
+		}
+	} else {
+		globalConfigurationExisted = true
+	}
+}
+
+func homeDir() (home string) {
+	u, err := user.Current()
+	if u != nil && err == nil {
+		home = u.HomeDir
+	}
+
+	if home == "" {
+		home = os.Getenv("HOME")
+	}
+
+	if home == "" {
+		if runtime.GOOS == "plan9" {
+			home = os.Getenv("home")
+		} else if runtime.GOOS == "windows" {
+			home = os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
+			if home == "" {
+				home = os.Getenv("USERPROFILE")
+			}
+		}
+	}
+
+	return
+}
+
 var errConfigurationDecode = errors.New("error while trying to decode configuration")
+
+func parseYAML(filename string) (Configuration, error) {
+	c := DefaultConfiguration()
+	// get the abs
+	// which will try to find the 'filename' from current workind dir too.
+	yamlAbsPath, err := filepath.Abs(filename)
+	if err != nil {
+		return c, errConfigurationDecode.AppendErr(err)
+	}
+
+	// read the raw contents of the file
+	data, err := ioutil.ReadFile(yamlAbsPath)
+	if err != nil {
+		return c, errConfigurationDecode.AppendErr(err)
+	}
+
+	// put the file's contents as yaml to the default configuration(c)
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		return c, errConfigurationDecode.AppendErr(err)
+	}
+	return c, nil
+}
 
 // YAML reads Configuration from a configuration.yml file.
 //
@@ -19,27 +104,26 @@ var errConfigurationDecode = errors.New("error while trying to decode configurat
 // An error will be shown to the user via panic with the error message.
 // Error may occur when the cfg.yml doesn't exists or is not formatted correctly.
 //
+// Note: if the char '~' passed as "filename" then it tries to load and return
+// the configuration from the $home_directory + iris.yml,
+// see `WithGlobalConfiguration` for more information.
+//
 // Usage:
-// app := iris.Run(iris.Addr(":8080"), iris.WithConfiguration(iris.YAML("myconfig.yml")))
+// app.Configure(iris.WithConfiguration(iris.YAML("myconfig.yml"))) or
+// app.Run([iris.Runner], iris.WithConfiguration(iris.YAML("myconfig.yml"))).
 func YAML(filename string) Configuration {
-	c := DefaultConfiguration()
-
-	// get the abs
-	// which will try to find the 'filename' from current workind dir too.
-	yamlAbsPath, err := filepath.Abs(filename)
-	if err != nil {
-		panic(errConfigurationDecode.AppendErr(err))
+	// check for globe configuration file and use that, otherwise
+	// return the default configuration if file doesn't exist.
+	if filename == globalConfigurationKeyword {
+		filename = homeConfigurationFilename(".yml")
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			panic("default configuration file '" + filename + "' does not exist")
+		}
 	}
 
-	// read the raw contents of the file
-	data, err := ioutil.ReadFile(yamlAbsPath)
+	c, err := parseYAML(filename)
 	if err != nil {
-		panic(errConfigurationDecode.AppendErr(err))
-	}
-
-	// put the file's contents as yaml to the default configuration(c)
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		panic(errConfigurationDecode.AppendErr(err))
+		panic(err)
 	}
 
 	return c
@@ -54,10 +138,24 @@ func YAML(filename string) Configuration {
 // An error will be shown to the user via panic with the error message.
 // Error may occur when the file doesn't exists or is not formatted correctly.
 //
+// Note: if the char '~' passed as "filename" then it tries to load and return
+// the configuration from the $home_directory + iris.tml,
+// see `WithGlobalConfiguration` for more information.
+//
 // Usage:
-// app := iris.Run(iris.Addr(":8080"), iris.WithConfiguration(iris.YAML("myconfig.tml")))
+// app.Configure(iris.WithConfiguration(iris.YAML("myconfig.tml"))) or
+// app.Run([iris.Runner], iris.WithConfiguration(iris.YAML("myconfig.tml"))).
 func TOML(filename string) Configuration {
 	c := DefaultConfiguration()
+
+	// check for globe configuration file and use that, otherwise
+	// return the default configuration if file doesn't exist.
+	if filename == globalConfigurationKeyword {
+		filename = homeConfigurationFilename(".tml")
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			panic("default configuration file '" + filename + "' does not exist")
+		}
+	}
 
 	// get the abs
 	// which will try to find the 'filename' from current workind dir too.
@@ -91,6 +189,19 @@ func TOML(filename string) Configuration {
 //
 // Currently Configurator is being used to describe the configuration's fields values.
 type Configurator func(*Application)
+
+// WithGlobalConfiguration will load the global yaml configuration file
+// from the home directory and it will set/override the whole app's configuration
+// to that file's contents. The global configuration file can be modified by user
+// and be used by multiple iris instances.
+//
+// This is useful when we run multiple iris servers that share the same
+// configuration, even with custom values at its "Other" field.
+//
+// Usage: `app.Configure(iris.WithGlobalConfiguration)` or `app.Run([iris.Runner], iris.WithGlobalConfiguration)`.
+var WithGlobalConfiguration = func(app *Application) {
+	app.Configure(WithConfiguration(YAML(globalConfigurationKeyword)))
+}
 
 // variables for configurators don't need any receivers, functions
 // for them that need (helps code editors to recognise as variables without parenthesis completion).
@@ -137,6 +248,9 @@ var WithoutInterruptHandler = func(app *Application) {
 }
 
 // WithoutVersionChecker will disable the version checker and updater.
+// The Iris server will be not
+// receive automatic updates if you pass this
+// to the `Run` function. Use it only while you're ready for Production environment.
 var WithoutVersionChecker = func(app *Application) {
 	app.config.DisableVersionChecker = true
 }
@@ -201,13 +315,31 @@ func WithCharset(charset string) Configurator {
 	}
 }
 
+// WithPostMaxMemory sets the maximum post data size
+// that a client can send to the server, this differs
+// from the overral request body size which can be modified
+// by the `context#SetMaxRequestBodySize` or `iris#LimitRequestBodySize`.
+//
+// Defaults to 32MB or 32 << 20 if you prefer.
+func WithPostMaxMemory(limit int64) Configurator {
+	return func(app *Application) {
+		app.config.PostMaxMemory = limit
+	}
+}
+
 // WithRemoteAddrHeader enables or adds a new or existing request header name
 // that can be used to validate the client's real IP.
 //
-// Existing values are:
-// "X-Real-Ip":             false,
-// "X-Forwarded-For":       false,
-// "CF-Connecting-IP": false
+// By-default no "X-" header is consired safe to be used for retrieving the
+// client's IP address, because those headers can manually change by
+// the client. But sometimes are useful e.g., when behind a proxy
+// you want to enable the "X-Forwarded-For" or when cloudflare
+// you want to enable the "CF-Connecting-IP", inneed you
+// can allow the `ctx.RemoteAddr()` to use any header
+// that the client may sent.
+//
+// Defaults to an empty map but an example usage is:
+// WithRemoteAddrHeader("X-Forwarded-For")
 //
 // Look `context.RemoteAddr()` for more.
 func WithRemoteAddrHeader(headerName string) Configurator {
@@ -220,12 +352,12 @@ func WithRemoteAddrHeader(headerName string) Configurator {
 }
 
 // WithoutRemoteAddrHeader disables an existing request header name
-// that can be used to validate the client's real IP.
+// that can be used to validate and parse the client's real IP.
 //
-// Existing values are:
-// "X-Real-Ip":             false,
-// "X-Forwarded-For":       false,
-// "CF-Connecting-IP": false
+//
+// Keep note that RemoteAddrHeaders is already defaults to an empty map
+// so you don't have to call this Configurator if you didn't
+// add allowed headers via configuration or via `WithRemoteAddrHeader` before.
 //
 // Look `context.RemoteAddr()` for more.
 func WithoutRemoteAddrHeader(headerName string) Configurator {
@@ -268,23 +400,23 @@ type Configuration struct {
 	// Example: https://github.com/kataras/iris/tree/master/_examples/http-listening/listen-addr/omit-server-errors
 	//
 	// Defaults to an empty slice.
-	IgnoreServerErrors []string `yaml:"IgnoreServerErrors" toml:"IgnoreServerErrors"`
+	IgnoreServerErrors []string `json:"ignoreServerErrors,omitempty" yaml:"IgnoreServerErrors" toml:"IgnoreServerErrors"`
 
 	// DisableStartupLog if setted to true then it turns off the write banner on server startup.
 	//
 	// Defaults to false.
-	DisableStartupLog bool `yaml:"DisableStartupLog" toml:"DisableStartupLog"`
+	DisableStartupLog bool `json:"disableStartupLog,omitempty" yaml:"DisableStartupLog" toml:"DisableStartupLog"`
 	// DisableInterruptHandler if setted to true then it disables the automatic graceful server shutdown
 	// when control/cmd+C pressed.
 	// Turn this to true if you're planning to handle this by your own via a custom host.Task.
 	//
 	// Defaults to false.
-	DisableInterruptHandler bool `yaml:"DisableInterruptHandler" toml:"DisableInterruptHandler"`
+	DisableInterruptHandler bool `json:"disableInterruptHandler,omitempty" yaml:"DisableInterruptHandler" toml:"DisableInterruptHandler"`
 
 	// DisableVersionChecker if true then process will be not be notified for any available updates.
 	//
 	// Defaults to false.
-	DisableVersionChecker bool `yaml:"DisableVersionChecker" toml:"DisableVersionChecker"`
+	DisableVersionChecker bool `json:"disableVersionChecker,omitempty" yaml:"DisableVersionChecker" toml:"DisableVersionChecker"`
 
 	// DisablePathCorrection corrects and redirects the requested path to the registered path
 	// for example, if /home/ path is requested but no handler for this Route found,
@@ -292,7 +424,7 @@ type Configuration struct {
 	// (permant)redirects the client to the correct path /home
 	//
 	// Defaults to false.
-	DisablePathCorrection bool `yaml:"DisablePathCorrection" toml:"DisablePathCorrection"`
+	DisablePathCorrection bool `json:"disablePathCorrection,omitempty" yaml:"DisablePathCorrection" toml:"DisablePathCorrection"`
 
 	// EnablePathEscape when is true then its escapes the path, the named parameters (if any).
 	// Change to false it if you want something like this https://github.com/kataras/iris/issues/135 to work
@@ -305,17 +437,17 @@ type Configuration struct {
 	// projectName, _ := url.QueryUnescape(c.Param("project").
 	//
 	// Defaults to false.
-	EnablePathEscape bool `yaml:"EnablePathEscape" toml:"EnablePathEscape"`
+	EnablePathEscape bool `json:"enablePathEscape,omitempty" yaml:"EnablePathEscape" toml:"EnablePathEscape"`
 
 	// EnableOptimization when this field is true
 	// then the application tries to optimize for the best performance where is possible.
 	//
 	// Defaults to false.
-	EnableOptimizations bool `yaml:"EnableOptimizations" toml:"EnableOptimizations"`
+	EnableOptimizations bool `json:"enableOptimizations,omitempty" yaml:"EnableOptimizations" toml:"EnableOptimizations"`
 	// FireMethodNotAllowed if it's true router checks for StatusMethodNotAllowed(405) and
 	//  fires the 405 error instead of 404
 	// Defaults to false.
-	FireMethodNotAllowed bool `yaml:"FireMethodNotAllowed" toml:"FireMethodNotAllowed"`
+	FireMethodNotAllowed bool `json:"fireMethodNotAllowed,omitempty" yaml:"FireMethodNotAllowed" toml:"FireMethodNotAllowed"`
 
 	// DisableBodyConsumptionOnUnmarshal manages the reading behavior of the context's body readers/binders.
 	// If setted to true then it
@@ -325,30 +457,38 @@ type Configuration struct {
 	// if this field setted to true then a new buffer will be created to read from and the request body.
 	// The body will not be changed and existing data before the
 	// context.UnmarshalBody/ReadJSON/ReadXML will be not consumed.
-	DisableBodyConsumptionOnUnmarshal bool `yaml:"DisableBodyConsumptionOnUnmarshal" toml:"DisableBodyConsumptionOnUnmarshal"`
+	DisableBodyConsumptionOnUnmarshal bool `json:"disableBodyConsumptionOnUnmarshal,omitempty" yaml:"DisableBodyConsumptionOnUnmarshal" toml:"DisableBodyConsumptionOnUnmarshal"`
 
 	// DisableAutoFireStatusCode if true then it turns off the http error status code handler automatic execution
-	// from "context.StatusCode(>=400)" and instead app should manually call the "context.FireStatusCode(>=400)".
+	// from (`context.StatusCodeNotSuccessful`, defaults to < 200 || >= 400).
+	// If that is false then for a direct error firing, then call the "context#FireStatusCode(statusCode)" manually.
 	//
 	// By-default a custom http error handler will be fired when "context.StatusCode(code)" called,
-	// code should be >=400 in order to be received as an "http error handler".
+	// code should be equal with the result of the the `context.StatusCodeNotSuccessful` in order to be received as an "http error handler".
 	//
 	// Developer may want this option to setted as true in order to manually call the
-	// error handlers when needed via "context.FireStatusCode(>=400)".
+	// error handlers when needed via "context#FireStatusCode(< 200 || >= 400)".
 	// HTTP Custom error handlers are being registered via app.OnErrorCode(code, handler)".
 	//
 	// Defaults to false.
-	DisableAutoFireStatusCode bool `yaml:"DisableAutoFireStatusCode" toml:"DisableAutoFireStatusCode"`
+	DisableAutoFireStatusCode bool `json:"disableAutoFireStatusCode,omitempty" yaml:"DisableAutoFireStatusCode" toml:"DisableAutoFireStatusCode"`
 
 	// TimeFormat time format for any kind of datetime parsing
 	// Defaults to  "Mon, 02 Jan 2006 15:04:05 GMT".
-	TimeFormat string `yaml:"TimeFormat" toml:"TimeFormat"`
+	TimeFormat string `json:"timeFormat,omitempty" yaml:"TimeFormat" toml:"TimeFormat"`
 
 	// Charset character encoding for various rendering
 	// used for templates and the rest of the responses
 	// Defaults to "UTF-8".
-	Charset string `yaml:"Charset" toml:"Charset"`
+	Charset string `json:"charset,omitempty" yaml:"Charset" toml:"Charset"`
 
+	// PostMaxMemory sets the maximum post data size
+	// that a client can send to the server, this differs
+	// from the overral request body size which can be modified
+	// by the `context#SetMaxRequestBodySize` or `iris#LimitRequestBodySize`.
+	//
+	// Defaults to 32MB or 32 << 20 if you prefer.
+	PostMaxMemory int64 `json:"postMaxMemory" yaml:"PostMaxMemory" toml:"PostMaxMemory"`
 	//  +----------------------------------------------------+
 	//  | Context's keys for values used on various featuers |
 	//  +----------------------------------------------------+
@@ -359,11 +499,11 @@ type Configuration struct {
 	// currently we have only one: https://github.com/kataras/iris/tree/master/middleware/i18n.
 	//
 	// Defaults to "iris.translate" and "iris.language"
-	TranslateFunctionContextKey string `yaml:"TranslateFunctionContextKey" toml:"TranslateFunctionContextKey"`
+	TranslateFunctionContextKey string `json:"translateFunctionContextKey,omitempty" yaml:"TranslateFunctionContextKey" toml:"TranslateFunctionContextKey"`
 	// TranslateLanguageContextKey used for i18n.
 	//
 	// Defaults to "iris.language"
-	TranslateLanguageContextKey string `yaml:"TranslateLanguageContextKey" toml:"TranslateLanguageContextKey"`
+	TranslateLanguageContextKey string `json:"translateLanguageContextKey,omitempty" yaml:"TranslateLanguageContextKey" toml:"TranslateLanguageContextKey"`
 
 	// GetViewLayoutContextKey is the key of the context's user values' key
 	// which is being used to set the template
@@ -371,29 +511,38 @@ type Configuration struct {
 	// Overrides the parent's or the configuration's.
 	//
 	// Defaults to "iris.ViewLayout"
-	ViewLayoutContextKey string `yaml:"ViewLayoutContextKey" toml:"ViewLayoutContextKey"`
+	ViewLayoutContextKey string `json:"viewLayoutContextKey,omitempty" yaml:"ViewLayoutContextKey" toml:"ViewLayoutContextKey"`
 	// GetViewDataContextKey is the key of the context's user values' key
 	// which is being used to set the template
 	// binding data from a middleware or the main handler.
 	//
 	// Defaults to "iris.viewData"
-	ViewDataContextKey string `yaml:"ViewDataContextKey" toml:"ViewDataContextKey"`
-	// RemoteAddrHeaders returns the allowed request headers names
+	ViewDataContextKey string `json:"viewDataContextKey,omitempty" yaml:"ViewDataContextKey" toml:"ViewDataContextKey"`
+	// RemoteAddrHeaders are the allowed request headers names
 	// that can be valid to parse the client's IP based on.
+	// By-default no "X-" header is consired safe to be used for retrieving the
+	// client's IP address, because those headers can manually change by
+	// the client. But sometimes are useful e.g., when behind a proxy
+	// you want to enable the "X-Forwarded-For" or when cloudflare
+	// you want to enable the "CF-Connecting-IP", inneed you
+	// can allow the `ctx.RemoteAddr()` to use any header
+	// that the client may sent.
 	//
-	// Defaults to:
-	// "X-Real-Ip":             false,
-	// "X-Forwarded-For":       false,
-	// "CF-Connecting-IP": false
+	// Defaults to an empty map but an example usage is:
+	// RemoteAddrHeaders {
+	//	"X-Real-Ip":             true,
+	//  "X-Forwarded-For":       true,
+	// 	"CF-Connecting-IP": 	 true,
+	//	}
 	//
 	// Look `context.RemoteAddr()` for more.
-	RemoteAddrHeaders map[string]bool `yaml:"RemoteAddrHeaders" toml:"RemoteAddrHeaders"`
+	RemoteAddrHeaders map[string]bool `json:"remoteAddrHeaders,omitempty" yaml:"RemoteAddrHeaders" toml:"RemoteAddrHeaders"`
 
 	// Other are the custom, dynamic options, can be empty.
-	// This field used only by you to set any app's options you want
-	// or by custom adaptors, it's a way to simple communicate between your adaptors (if any)
+	// This field used only by you to set any app's options you want.
+	//
 	// Defaults to a non-nil empty map.
-	Other map[string]interface{} `yaml:"Other" toml:"Other"`
+	Other map[string]interface{} `json:"other,omitempty" yaml:"Other" toml:"Other"`
 }
 
 var _ context.ConfigurationReadOnly = &Configuration{}
@@ -465,6 +614,16 @@ func (c Configuration) GetCharset() string {
 	return c.Charset
 }
 
+// GetPostMaxMemory returns the maximum configured post data size
+// that a client can send to the server, this differs
+// from the overral request body size which can be modified
+// by the `context#SetMaxRequestBodySize` or `iris#LimitRequestBodySize`.
+//
+// Defaults to 32MB or 32 << 20 if you prefer.
+func (c Configuration) GetPostMaxMemory() int64 {
+	return c.PostMaxMemory
+}
+
 // GetTranslateFunctionContextKey returns the configuration's TranslateFunctionContextKey value,
 // used for i18n.
 func (c Configuration) GetTranslateFunctionContextKey() string {
@@ -494,11 +653,20 @@ func (c Configuration) GetViewDataContextKey() string {
 
 // GetRemoteAddrHeaders returns the allowed request headers names
 // that can be valid to parse the client's IP based on.
+// By-default no "X-" header is consired safe to be used for retrieving the
+// client's IP address, because those headers can manually change by
+// the client. But sometimes are useful e.g., when behind a proxy
+// you want to enable the "X-Forwarded-For" or when cloudflare
+// you want to enable the "CF-Connecting-IP", inneed you
+// can allow the `ctx.RemoteAddr()` to use any header
+// that the client may sent.
 //
-// Defaults to:
-// "X-Real-Ip":             false,
-// "X-Forwarded-For":       false,
-// "CF-Connecting-IP": false
+// Defaults to an empty map but an example usage is:
+// RemoteAddrHeaders {
+//	"X-Real-Ip":             true,
+//  "X-Forwarded-For":       true,
+// 	"CF-Connecting-IP": 	 true,
+//	}
 //
 // Look `context.RemoteAddr()` for more.
 func (c Configuration) GetRemoteAddrHeaders() map[string]bool {
@@ -570,6 +738,10 @@ func WithConfiguration(c Configuration) Configurator {
 			main.Charset = v
 		}
 
+		if v := c.PostMaxMemory; v > 0 {
+			main.PostMaxMemory = v
+		}
+
 		if v := c.TranslateFunctionContextKey; v != "" {
 			main.TranslateFunctionContextKey = v
 		}
@@ -588,7 +760,7 @@ func WithConfiguration(c Configuration) Configurator {
 
 		if v := c.RemoteAddrHeaders; len(v) > 0 {
 			if main.RemoteAddrHeaders == nil {
-				main.RemoteAddrHeaders = make(map[string]bool)
+				main.RemoteAddrHeaders = make(map[string]bool, len(v))
 			}
 			for key, value := range v {
 				main.RemoteAddrHeaders[key] = value
@@ -597,7 +769,7 @@ func WithConfiguration(c Configuration) Configurator {
 
 		if v := c.Other; len(v) > 0 {
 			if main.Other == nil {
-				main.Other = make(map[string]interface{})
+				main.Other = make(map[string]interface{}, len(v))
 			}
 			for key, value := range v {
 				main.Other[key] = value
@@ -619,16 +791,19 @@ func DefaultConfiguration() Configuration {
 		DisableAutoFireStatusCode:         false,
 		TimeFormat:                        "Mon, Jan 02 2006 15:04:05 GMT",
 		Charset:                           "UTF-8",
-		TranslateFunctionContextKey:       "iris.translate",
-		TranslateLanguageContextKey:       "iris.language",
-		ViewLayoutContextKey:              "iris.viewLayout",
-		ViewDataContextKey:                "iris.viewData",
-		RemoteAddrHeaders: map[string]bool{
-			"X-Real-Ip":        false,
-			"X-Forwarded-For":  false,
-			"CF-Connecting-IP": false,
-		},
-		EnableOptimizations: false,
-		Other:               make(map[string]interface{}),
+
+		// PostMaxMemory is for post body max memory.
+		//
+		// The request body the size limit
+		// can be set by the middleware `LimitRequestBodySize`
+		// or `context#SetMaxRequestBodySize`.
+		PostMaxMemory:               32 << 20, // 32MB
+		TranslateFunctionContextKey: "iris.translate",
+		TranslateLanguageContextKey: "iris.language",
+		ViewLayoutContextKey:        "iris.viewLayout",
+		ViewDataContextKey:          "iris.viewData",
+		RemoteAddrHeaders:           make(map[string]bool),
+		EnableOptimizations:         false,
+		Other:                       make(map[string]interface{}),
 	}
 }

@@ -35,6 +35,7 @@ func (r resource) loadFromBase(dir string) string {
 	}
 
 	result := string(b)
+
 	return result
 }
 

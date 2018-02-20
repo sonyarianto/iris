@@ -10,7 +10,6 @@ import (
 	"github.com/kataras/iris/context"
 	"github.com/kataras/iris/core/errors"
 	"github.com/kataras/iris/core/router/macro"
-	"github.com/kataras/iris/mvc/activator"
 )
 
 const (
@@ -86,10 +85,10 @@ type APIBuilder struct {
 	// even before the `middleware` handlers, and in the same time keep the order
 	// of handlers registration, so the same type of handlers are being called in order.
 	beginGlobalHandlers context.Handlers
-	// the per-party routes registry (useful for `Done` and `UseGlobal` only)
-	apiRoutes []*Route
-	// the per-party done handlers, order
-	// of handlers registration matters.
+
+	// the per-party done handlers, order matters.
+	doneHandlers context.Handlers
+	// global done handlers, order doesn't matter
 	doneGlobalHandlers context.Handlers
 	// the per-party
 	relativePath string
@@ -110,6 +109,14 @@ func NewAPIBuilder() *APIBuilder {
 	}
 
 	return api
+}
+
+// GetRelPath returns the current party's relative path.
+// i.e:
+// if r := app.Party("/users"), then the `r.GetRelPath()` is the "/users".
+// if r := app.Party("www.") or app.Subdomain("www") then the `r.GetRelPath()` is the "www.".
+func (api *APIBuilder) GetRelPath() string {
+	return api.relativePath
 }
 
 // GetReport returns an error may caused by party's methods.
@@ -146,32 +153,38 @@ func (api *APIBuilder) Handle(method string, relativePath string, handlers ...co
 	}
 
 	fullpath := api.relativePath + relativePath // for now, keep the last "/" if any,  "/xyz/"
+	if len(handlers) == 0 {
+		api.reporter.Add("missing handlers for route %s: %s", method, fullpath)
+		return nil
+	}
+
+	// before join the middleware + handlers + done handlers.
+	possibleMainHandlerName := context.HandlerName(handlers[0])
 
 	// global begin handlers -> middleware that are registered before route registration
 	// -> handlers that are passed to this Handle function.
 	routeHandlers := joinHandlers(api.middleware, handlers)
-	// -> done handlers after all
-	if len(api.doneGlobalHandlers) > 0 {
-		routeHandlers = append(routeHandlers, api.doneGlobalHandlers...) // register the done middleware, if any
-	}
+	// -> done handlers
+	routeHandlers = joinHandlers(routeHandlers, api.doneHandlers)
 
 	// here we separate the subdomain and relative path
 	subdomain, path := splitSubdomainAndPath(fullpath)
 
-	r, err := NewRoute(method, subdomain, path, routeHandlers, api.macros)
+	r, err := NewRoute(method, subdomain, path, possibleMainHandlerName, routeHandlers, api.macros)
 	if err != nil { // template path parser errors:
 		api.reporter.Add("%v -> %s:%s:%s", err, method, subdomain, path)
 		return nil
 	}
 
-	// Add UseGlobal Handlers
+	// Add UseGlobal & DoneGlobal Handlers
 	r.use(api.beginGlobalHandlers)
+	r.done(api.doneGlobalHandlers)
 
 	// global
 	api.routes.register(r)
 
 	// per -party, used for done handlers
-	api.apiRoutes = append(api.apiRoutes, r)
+	// api.apiRoutes = append(api.apiRoutes, r)
 
 	return r
 }
@@ -183,23 +196,20 @@ func (api *APIBuilder) Handle(method string, relativePath string, handlers ...co
 // otherwise use `Party` which can handle many paths with different handlers and middlewares.
 //
 // Usage:
-// 	app.HandleMany(iris.MethodGet, "/user /user/{id:int} /user/me", userHandler)
+// 	app.HandleMany("GET", "/user /user/{id:int} /user/me", genericUserHandler)
 // At the other side, with `Handle` we've had to write:
-// 	app.Handle(iris.MethodGet, "/user", userHandler)
-// 	app.Handle(iris.MethodGet, "/user/{id:int}", userHandler)
-// 	app.Handle(iris.MethodGet, "/user/me", userHandler)
+// 	app.Handle("GET", "/user", userHandler)
+// 	app.Handle("GET", "/user/{id:int}", userByIDHandler)
+// 	app.Handle("GET", "/user/me", userMeHandler)
 //
 // This method is used behind the scenes at the `Controller` function
 // in order to handle more than one paths for the same controller instance.
 func (api *APIBuilder) HandleMany(methodOrMulti string, relativePathorMulti string, handlers ...context.Handler) (routes []*Route) {
-	trimmedPath := strings.Trim(relativePathorMulti, " ")
-	trimmedMethod := strings.Trim(methodOrMulti, " ")
 	// at least slash
 	// a space
 	// at least one other slash for the next path
-	// app.Controller("/user /user{id}", new(UserController))
-	paths := strings.Split(trimmedPath, " ")
-	methods := strings.Split(trimmedMethod, " ")
+	paths := splitPath(relativePathorMulti)
+	methods := splitMethod(methodOrMulti)
 	for _, p := range paths {
 		if p != "" {
 			for _, method := range methods {
@@ -218,8 +228,10 @@ func (api *APIBuilder) HandleMany(methodOrMulti string, relativePathorMulti stri
 	return
 }
 
-// Party is just a group joiner of routes which have the same prefix and share same middleware(s) also.
-// Party could also be named as 'Join' or 'Node' or 'Group' , Party chosen because it is fun.
+// Party groups routes which may have the same prefix and share same handlers,
+// returns that new rich subrouter.
+//
+// You can even declare a subdomain with relativePath as "mysub." or see `Subdomain`.
 func (api *APIBuilder) Party(relativePath string, handlers ...context.Handler) Party {
 	parentPath := api.relativePath
 	dot := string(SubdomainPrefix[0])
@@ -257,6 +269,7 @@ func (api *APIBuilder) Party(relativePath string, handlers ...context.Handler) P
 		reporter:            api.reporter,
 		// per-party/children
 		middleware:   middleware,
+		doneHandlers: api.doneHandlers,
 		relativePath: fullpath,
 	}
 }
@@ -287,7 +300,7 @@ func (api *APIBuilder) PartyFunc(relativePath string, partyBuilderFunc func(p Pa
 // this specific "subdomain".
 //
 // If called from a child party then the subdomain will be prepended to the path instead of appended.
-// So if app.Subdomain("admin.").Subdomain("panel.") then the result is: "panel.admin.".
+// So if app.Subdomain("admin").Subdomain("panel") then the result is: "panel.admin.".
 func (api *APIBuilder) Subdomain(subdomain string, middleware ...context.Handler) Party {
 	if api.relativePath == SubdomainWildcardIndicator {
 		// cannot concat wildcard subdomain with something else
@@ -295,6 +308,12 @@ func (api *APIBuilder) Subdomain(subdomain string, middleware ...context.Handler
 			api.relativePath, subdomain)
 		return api
 	}
+	if l := len(subdomain); l < 1 {
+		return api
+	} else if subdomain[l-1] != '.' {
+		subdomain += "."
+	}
+
 	return api.Party(subdomain, middleware...)
 }
 
@@ -360,22 +379,14 @@ func (api *APIBuilder) Use(handlers ...context.Handler) {
 	api.middleware = append(api.middleware, handlers...)
 }
 
-// Done appends to the very end, Handler(s) to the current Party's routes and child routes
-// The difference from .Use is that this/or these Handler(s) are being always running last.
-func (api *APIBuilder) Done(handlers ...context.Handler) {
-	for _, r := range api.routes.routes {
-		r.done(handlers) // append the handlers to the existing routes
-	}
-	// set as done handlers for the next routes as well.
-	api.doneGlobalHandlers = append(api.doneGlobalHandlers, handlers...)
-}
-
-// UseGlobal registers handlers that should run before all routes,
-// including all parties, subdomains
-// and other middleware that were registered before or will be after.
+// UseGlobal registers handlers that should run at the very beginning.
+// It prepends those handler(s) to all routes,
+// including all parties, subdomains.
 // It doesn't care about call order, it will prepend the handlers to all
 // existing routes and the future routes that may being registered.
 //
+// The difference from `.DoneGLobal` is that this/or these Handler(s) are being always running first.
+// Use of `ctx.Next()` of those handler(s) is necessary to call the main handler or the next middleware.
 // It's always a good practise to call it right before the `Application#Run` function.
 func (api *APIBuilder) UseGlobal(handlers ...context.Handler) {
 	for _, r := range api.routes.routes {
@@ -383,6 +394,42 @@ func (api *APIBuilder) UseGlobal(handlers ...context.Handler) {
 	}
 	// set as begin handlers for the next routes as well.
 	api.beginGlobalHandlers = append(api.beginGlobalHandlers, handlers...)
+}
+
+// Done appends to the very end, Handler(s) to the current Party's routes and child routes.
+//
+// Call order matters, it should be called right before the routes that they care about these handlers.
+//
+// The difference from .Use is that this/or these Handler(s) are being always running last.
+func (api *APIBuilder) Done(handlers ...context.Handler) {
+	api.doneHandlers = append(api.doneHandlers, handlers...)
+}
+
+// DoneGlobal registers handlers that should run at the very end.
+// It appends those handler(s) to all routes,
+// including all parties, subdomains.
+// It doesn't care about call order, it will append the handlers to all
+// existing routes and the future routes that may being registered.
+//
+// The difference from `.UseGlobal` is that this/or these Handler(s) are being always running last.
+// Use of `ctx.Next()` at the previous handler is necessary.
+// It's always a good practise to call it right before the `Application#Run` function.
+func (api *APIBuilder) DoneGlobal(handlers ...context.Handler) {
+	for _, r := range api.routes.routes {
+		r.done(handlers) // append the handlers to the existing routes
+	}
+	// set as done handlers for the next routes as well.
+	api.doneGlobalHandlers = append(api.doneGlobalHandlers, handlers...)
+}
+
+// Reset removes all the begin and done handlers that may derived from the parent party via `Use` & `Done`,
+// note that the `Reset` will not reset the handlers that are registered via `UseGlobal` & `DoneGlobal`.
+//
+// Returns this Party.
+func (api *APIBuilder) Reset() Party {
+	api.middleware = api.middleware[0:0]
+	api.doneHandlers = api.doneHandlers[0:0]
+	return api
 }
 
 // None registers an "offline" route
@@ -469,85 +516,6 @@ func (api *APIBuilder) Any(relativePath string, handlers ...context.Handler) (ro
 	return
 }
 
-// Controller registers a `Controller` instance and returns the registered Routes.
-// The "controller" receiver should embed a field of `Controller` in order
-// to be compatible Iris `Controller`.
-//
-// It's just an alternative way of building an API for a specific
-// path, the controller can register all type of http methods.
-//
-// Keep note that controllers are bit slow
-// because of the reflection use however it's as fast as possible because
-// it does preparation before the serve-time handler but still
-// remains slower than the low-level handlers
-// such as `Handle, Get, Post, Put, Delete, Connect, Head, Trace, Patch`.
-//
-//
-// All fields that are tagged with iris:"persistence"` or binded
-// are being persistence and kept the same between the different requests.
-//
-// An Example Controller can be:
-//
-// type IndexController struct {
-// 	Controller
-// }
-//
-// func (c *IndexController) Get() {
-// 	c.Tmpl = "index.html"
-// 	c.Data["title"] = "Index page"
-// 	c.Data["message"] = "Hello world!"
-// }
-//
-// Usage: app.Controller("/", new(IndexController))
-//
-//
-// Another example with bind:
-//
-// type UserController struct {
-// 	Controller
-//
-// 	DB        *DB
-// 	CreatedAt time.Time
-//
-// }
-//
-// // Get serves using the User controller when HTTP Method is "GET".
-// func (c *UserController) Get() {
-// 	c.Tmpl = "user/index.html"
-// 	c.Data["title"] = "User Page"
-// 	c.Data["username"] = "kataras " + c.Params.Get("userid")
-// 	c.Data["connstring"] = c.DB.Connstring
-// 	c.Data["uptime"] = time.Now().Sub(c.CreatedAt).Seconds()
-// }
-//
-// Usage: app.Controller("/user/{id:int}", new(UserController), db, time.Now())
-// Note: Binded values of context.Handler type are being recognised as middlewares by the router.
-//
-// Read more at `/mvc#Controller`.
-func (api *APIBuilder) Controller(relativePath string, controller activator.BaseController,
-	bindValues ...interface{}) (routes []*Route) {
-
-	registerFunc := func(ifRelPath string, method string, handlers ...context.Handler) {
-		relPath := relativePath + ifRelPath
-		r := api.HandleMany(method, relPath, handlers...)
-		routes = append(routes, r...)
-	}
-
-	// bind any values to the controller's relative fields
-	// and set them on each new request controller,
-	// binder is an alternative method
-	// of the persistence data control which requires the
-	// user already set the values manually to controller's fields
-	// and tag them with `iris:"persistence"`.
-	//
-	// don't worry it will never be handled if empty values.
-	if err := activator.Register(controller, bindValues, registerFunc); err != nil {
-		api.reporter.Add("%v for path: '%s'", err, relativePath)
-	}
-
-	return
-}
-
 // StaticCacheDuration expiration duration for INACTIVE file handlers, it's the only one global configuration
 // which can be changed.
 var StaticCacheDuration = 20 * time.Second
@@ -592,15 +560,9 @@ func (api *APIBuilder) StaticHandler(systemPath string, showList bool, gzip bool
 	return StaticHandler(systemPath, showList, gzip)
 }
 
-// StaticServe serves a directory as web resource
-// it's the simpliest form of the Static* functions
-// Almost same usage as StaticWeb
-// accepts only one required parameter which is the systemPath,
-// the same path will be used to register the GET and HEAD method routes.
-// If second parameter is empty, otherwise the requestPath is the second parameter
-// it uses gzip compression (compression on each request, no file cache).
-//
-// Returns the GET *Route.
+// StaticServe serves a directory as web resource.
+// Same as `StaticWeb`.
+// DEPRECATED; use `StaticWeb` or `StaticHandler` (for more options) instead.
 func (api *APIBuilder) StaticServe(systemPath string, requestPath ...string) *Route {
 	var reqPath string
 
@@ -612,22 +574,7 @@ func (api *APIBuilder) StaticServe(systemPath string, requestPath ...string) *Ro
 		reqPath = requestPath[0]
 	}
 
-	return api.Get(joinPath(reqPath, WildcardParam("file")), func(ctx context.Context) {
-		filepath := ctx.Params().Get("file")
-
-		spath := strings.Replace(filepath, "/", string(os.PathSeparator), -1)
-		spath = path.Join(systemPath, spath)
-
-		if !DirectoryExists(spath) {
-			ctx.NotFound()
-			return
-		}
-
-		if err := ctx.ServeFile(spath, true); err != nil {
-			ctx.Application().Logger().Warnf("while trying to serve static file: '%v' on IP: '%s'", err, ctx.RemoteAddr())
-			ctx.StatusCode(http.StatusInternalServerError)
-		}
-	})
+	return api.StaticWeb(reqPath, systemPath)
 }
 
 // StaticContent registers a GET and HEAD method routes to the requestPath
@@ -670,6 +617,12 @@ func (api *APIBuilder) StaticEmbeddedHandler(vdir string, assetFn func(name stri
 // Examples: https://github.com/kataras/iris/tree/master/_examples/file-server
 func (api *APIBuilder) StaticEmbedded(requestPath string, vdir string, assetFn func(name string) ([]byte, error), namesFn func() []string) *Route {
 	fullpath := joinPath(api.relativePath, requestPath)
+	// if subdomain,
+	// here we get the full path of the path only,
+	// because a subdomain can have parties as well
+	// and we need that path to call the `StripPrefix`.
+	_, fullpath = splitSubdomainAndPath(fullpath)
+
 	requestPath = joinPath(fullpath, WildcardParam("file"))
 
 	h := api.StaticEmbeddedHandler(vdir, assetFn, namesFn)
@@ -678,6 +631,7 @@ func (api *APIBuilder) StaticEmbedded(requestPath string, vdir string, assetFn f
 		h = StripPrefix(fullpath, h)
 	}
 
+	// it handles the subdomain(root Party) of this party as well, if any.
 	return api.registerResourceRoute(requestPath, h)
 }
 
@@ -710,7 +664,6 @@ func (api *APIBuilder) Favicon(favPath string, requestPath ...string) *Route {
 		return api.Favicon(path.Join(favPath, "favicon.ico"))
 	}
 
-	cType := TypeByFilename(favPath)
 	// copy the bytes here in order to cache and not read the ico on each request.
 	cacheFav := make([]byte, fi.Size())
 	if _, err = f.Read(cacheFav); err != nil {
@@ -722,25 +675,14 @@ func (api *APIBuilder) Favicon(favPath string, requestPath ...string) *Route {
 			Format(favPath, "favicon: couldn't read the data bytes for file: "+err.Error()))
 		return nil
 	}
-	modtime := ""
+
+	modtime := time.Now()
+	cType := TypeByFilename(favPath)
 	h := func(ctx context.Context) {
-		if modtime == "" {
-			modtime = fi.ModTime().UTC().Format(ctx.Application().ConfigurationReadOnly().GetTimeFormat())
-		}
-		if t, err := time.Parse(ctx.Application().ConfigurationReadOnly().GetTimeFormat(), ctx.GetHeader(ifModifiedSinceHeaderKey)); err == nil && fi.ModTime().Before(t.Add(StaticCacheDuration)) {
-
-			ctx.ResponseWriter().Header().Del(contentTypeHeaderKey)
-			ctx.ResponseWriter().Header().Del(contentLengthHeaderKey)
-			ctx.StatusCode(http.StatusNotModified)
-			return
-		}
-
-		ctx.ResponseWriter().Header().Set(contentTypeHeaderKey, cType)
-		ctx.ResponseWriter().Header().Set(lastModifiedHeaderKey, modtime)
-		ctx.StatusCode(http.StatusOK)
-		if _, err := ctx.Write(cacheFav); err != nil {
-			// ctx.Application().Logger().Infof("error while trying to serve the favicon: %s", err.Error())
+		ctx.ContentType(cType)
+		if _, err := ctx.WriteWithExpiration(cacheFav, modtime); err != nil {
 			ctx.StatusCode(http.StatusInternalServerError)
+			ctx.Application().Logger().Debugf("while trying to serve the favicon: %s", err.Error())
 		}
 	}
 
@@ -770,33 +712,28 @@ func (api *APIBuilder) Favicon(favPath string, requestPath ...string) *Route {
 //
 // Returns the GET *Route.
 func (api *APIBuilder) StaticWeb(requestPath string, systemPath string) *Route {
-
 	paramName := "file"
 
 	fullpath := joinPath(api.relativePath, requestPath)
+	// if subdomain,
+	// here we get the full path of the path only,
+	// because a subdomain can have parties as well
+	// and we need that path to call the `StripPrefix`.
+	_, fullpath = splitSubdomainAndPath(fullpath)
 
-	h := StripPrefix(fullpath, NewStaticHandlerBuilder(systemPath).Listing(false).Build())
+	requestPath = joinPath(fullpath, WildcardParam(paramName))
+	h := NewStaticHandlerBuilder(systemPath).Listing(false).Build()
 
-	handler := func(ctx context.Context) {
-		h(ctx)
-		if ctx.GetStatusCode() >= 200 && ctx.GetStatusCode() < 400 {
-			// re-check the content type here for any case,
-			// although the new code does it automatically but it's good to have it here.
-			if _, exists := ctx.ResponseWriter().Header()["Content-Type"]; !exists {
-				if fname := ctx.Params().Get(paramName); fname != "" {
-					cType := TypeByFilename(fname)
-					ctx.ContentType(cType)
-				}
-			}
-		}
+	if fullpath != "/" {
+		h = StripPrefix(fullpath, h)
 	}
 
-	requestPath = joinPath(requestPath, WildcardParam(paramName))
-	return api.registerResourceRoute(requestPath, handler)
+	// it handles the subdomain(root Party) of this party as well, if any.
+	return api.registerResourceRoute(requestPath, h)
 }
 
 // OnErrorCode registers an error http status code
-// based on the "statusCode" >= 400.
+// based on the "statusCode" < 200 || >= 400 (came from `context.StatusCodeNotSuccessful`).
 // The handler is being wrapepd by a generic
 // handler which will try to reset
 // the body if recorder was enabled
@@ -811,55 +748,16 @@ func (api *APIBuilder) OnErrorCode(statusCode int, handlers ...context.Handler) 
 }
 
 // OnAnyErrorCode registers a handler which called when error status code written.
-// Same as `OnErrorCode` but registers all http error codes.
-// See: http://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml
+// Same as `OnErrorCode` but registers all http error codes based on the `context.StatusCodeNotSuccessful`
+// which defaults to < 200 || >= 400 for an error code, any previous error code will be overridden,
+// so call it first if you want to use any custom handler for a specific error status code.
+//
+// Read more at: http://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml
 func (api *APIBuilder) OnAnyErrorCode(handlers ...context.Handler) {
-	// we could register all >=400 and <=511 but this way
-	// could override custom status codes that iris developers can register for their
-	//  web apps whenever needed.
-	// There fore these are the hard coded http error statuses:
-	var errStatusCodes = []int{
-		http.StatusBadRequest,
-		http.StatusUnauthorized,
-		http.StatusPaymentRequired,
-		http.StatusForbidden,
-		http.StatusNotFound,
-		http.StatusMethodNotAllowed,
-		http.StatusNotAcceptable,
-		http.StatusProxyAuthRequired,
-		http.StatusRequestTimeout,
-		http.StatusConflict,
-		http.StatusGone,
-		http.StatusLengthRequired,
-		http.StatusPreconditionFailed,
-		http.StatusRequestEntityTooLarge,
-		http.StatusRequestURITooLong,
-		http.StatusUnsupportedMediaType,
-		http.StatusRequestedRangeNotSatisfiable,
-		http.StatusExpectationFailed,
-		http.StatusTeapot,
-		http.StatusUnprocessableEntity,
-		http.StatusLocked,
-		http.StatusFailedDependency,
-		http.StatusUpgradeRequired,
-		http.StatusPreconditionRequired,
-		http.StatusTooManyRequests,
-		http.StatusRequestHeaderFieldsTooLarge,
-		http.StatusUnavailableForLegalReasons,
-		http.StatusInternalServerError,
-		http.StatusNotImplemented,
-		http.StatusBadGateway,
-		http.StatusServiceUnavailable,
-		http.StatusGatewayTimeout,
-		http.StatusHTTPVersionNotSupported,
-		http.StatusVariantAlsoNegotiates,
-		http.StatusInsufficientStorage,
-		http.StatusLoopDetected,
-		http.StatusNotExtended,
-		http.StatusNetworkAuthenticationRequired}
-
-	for _, statusCode := range errStatusCodes {
-		api.OnErrorCode(statusCode, handlers...)
+	for code := 100; code <= 511; code++ {
+		if context.StatusCodeNotSuccessful(code) {
+			api.OnErrorCode(code, handlers...)
+		}
 	}
 }
 
@@ -872,16 +770,20 @@ func (api *APIBuilder) FireErrorCode(ctx context.Context) {
 	api.errorCodeHandlers.Fire(ctx)
 }
 
-// Layout oerrides the parent template layout with a more specific layout for this Party
-// returns this Party, to continue as normal
+// Layout overrides the parent template layout with a more specific layout for this Party.
+// It returns the current Party.
+//
+// The "tmplLayoutFile" should be a relative path to the templates dir.
 // Usage:
+//
 // app := iris.New()
+// app.RegisterView(iris.$VIEW_ENGINE("./views", ".$extension"))
 // my := app.Party("/my").Layout("layouts/mylayout.html")
-// 	{
-// 		my.Get("/", func(ctx context.Context) {
-// 			ctx.MustRender("page1.html", nil)
-// 		})
-// 	}
+// 	my.Get("/", func(ctx iris.Context) {
+// 		ctx.View("page1.html")
+// 	})
+//
+// Examples: https://github.com/kataras/iris/tree/master/_examples/view
 func (api *APIBuilder) Layout(tmplLayoutFile string) Party {
 	api.Use(func(ctx context.Context) {
 		ctx.ViewLayout(tmplLayoutFile)
@@ -892,14 +794,14 @@ func (api *APIBuilder) Layout(tmplLayoutFile string) Party {
 }
 
 // joinHandlers uses to create a copy of all Handlers and return them in order to use inside the node
-func joinHandlers(Handlers1 context.Handlers, Handlers2 context.Handlers) context.Handlers {
-	nowLen := len(Handlers1)
-	totalLen := nowLen + len(Handlers2)
-	// create a new slice of Handlers in order to store all handlers, the already handlers(Handlers) and the new
+func joinHandlers(h1 context.Handlers, h2 context.Handlers) context.Handlers {
+	nowLen := len(h1)
+	totalLen := nowLen + len(h2)
+	// create a new slice of Handlers in order to merge the "h1" and "h2"
 	newHandlers := make(context.Handlers, totalLen)
-	//copy the already Handlers to the just created
-	copy(newHandlers, Handlers1)
-	//start from there we finish, and store the new Handlers too
-	copy(newHandlers[nowLen:], Handlers2)
+	// copy the already Handlers to the just created
+	copy(newHandlers, h1)
+	// start from there we finish, and store the new Handlers too
+	copy(newHandlers[nowLen:], h2)
 	return newHandlers
 }
